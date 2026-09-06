@@ -5,8 +5,8 @@ USER root
 
 WORKDIR /app
 
-# Copy dependency files
-COPY package*.json ./
+# Copy dependency files and postinstall patch script
+COPY package*.json patch-wwebjs.js ./
 
 # Install production dependencies and trigger postinstall patch
 RUN npm ci --omit=dev || npm install --omit=dev
