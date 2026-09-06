@@ -346,6 +346,33 @@ app.post('/api/pairing-code', async (req, res) => {
   }
 });
 
+// Logout / unlink WhatsApp session
+app.post('/api/logout', async (_req, res) => {
+  try {
+    console.log('🚪 Logging out of WhatsApp session...');
+    clientReady = false;
+    cachedContacts = null;
+    qrCodeDataUrl = null;
+    io.emit('loading');
+
+    try {
+      await waClient.logout();
+    } catch (logoutErr) {
+      console.warn('Logout warning (session may already be closed):', logoutErr.message);
+    }
+
+    console.log('🔄 Re-initializing WhatsApp client...');
+    waClient.initialize().catch((initErr) => {
+      console.warn('Re-initialization note:', initErr.message);
+    });
+
+    res.json({ success: true, message: 'Logged out successfully.' });
+  } catch (err) {
+    console.error('Logout failed:', err);
+    res.status(500).json({ error: 'Logout failed: ' + err.message });
+  }
+});
+
 // Fetch contacts and recent chats
 app.get('/api/contacts', async (req, res) => {
   if (!clientReady) {

@@ -305,6 +305,14 @@ header h1 {
   user-select: all;
   font-family: monospace;
 }
+.btn-danger {
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1) !important;
+  border-color: #ef4444 !important;
+}
 .hidden {
   display: none !important;
 }

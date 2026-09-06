@@ -77,13 +77,21 @@
             </div>
             <div id="pairing-error" class="error-text hidden" style="margin-top:8px;"></div>
           </div>
+          <div style="margin-top: 14px;">
+            <button type="button" id="reconnect-btn" class="btn-text btn-small">🔄 Reset Session / Generate New QR</button>
+          </div>
         </div>
         <div id="ready-state" class="status-box hidden">
           <div class="status-header-row">
             <span class="badge badge-green">✅ WhatsApp Connected</span>
-            <button id="refresh-contacts-btn" class="btn btn-outline btn-small" title="Reload contacts from WhatsApp">
-              🔄 Refresh Contacts
-            </button>
+            <div style="display: flex; gap: 8px;">
+              <button id="refresh-contacts-btn" class="btn btn-outline btn-small" title="Reload contacts from WhatsApp">
+                🔄 Refresh Contacts
+              </button>
+              <button id="logout-btn" class="btn btn-outline btn-small btn-danger" title="Unlink WhatsApp session">
+                🚪 Logout
+              </button>
+            </div>
           </div>
           <p class="status-desc">Your WhatsApp session is active. Choose your contacts below to broadcast.</p>
         </div>
@@ -364,7 +372,15 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ phone }),
           });
-          const data = await res.json();
+          let data;
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            data = await res.json();
+          } else {
+            const text = await res.text();
+            throw new Error(res.status === 404 ? 'Server is still deploying or updating. Please wait a moment and retry.' : 'Server returned status ' + res.status);
+          }
+
           pairingLoading.classList.add('hidden');
           getPairingCodeBtn.disabled = false;
 
@@ -377,9 +393,39 @@
         } catch (err) {
           pairingLoading.classList.add('hidden');
           getPairingCodeBtn.disabled = false;
-          pairingError.textContent = 'Failed to request code: ' + err.message;
+          pairingError.textContent = err.message;
           pairingError.classList.remove('hidden');
         }
+      });
+    }
+
+    // ── Logout & Session Reset ─────────────────────────────────────────────
+    const logoutBtn    = document.getElementById('logout-btn');
+    const reconnectBtn = document.getElementById('reconnect-btn');
+
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to log out of WhatsApp? You will need to link your device again.')) {
+          return;
+        }
+        logoutBtn.disabled = true;
+        showStatus('loading');
+        try {
+          const res = await fetch(`${backendUrl}/api/logout`, { method: 'POST' });
+          const data = await res.json();
+          if (data.error) alert('Logout warning: ' + data.error);
+        } catch (err) {
+          console.warn('Logout request failed:', err);
+        }
+      });
+    }
+
+    if (reconnectBtn) {
+      reconnectBtn.addEventListener('click', async () => {
+        showStatus('loading');
+        try {
+          await fetch(`${backendUrl}/api/logout`, { method: 'POST' });
+        } catch (_) {}
       });
     }
 
