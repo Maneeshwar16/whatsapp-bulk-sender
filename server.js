@@ -52,7 +52,10 @@ let isSending = false;
 let cachedContacts = null;
 
 const authDataPath = process.env.DATA_PATH || './.wwebjs_auth/';
-const puppeteerExecutablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+const puppeteerExecutablePath =
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
+   fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 
 const waClient = new Client({
   authStrategy: new LocalAuth({
