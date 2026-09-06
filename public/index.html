@@ -227,10 +227,12 @@
     // ── Backend URL Setup (Supports Web + Android APK) ─────────────────────
     let backendUrl = localStorage.getItem('WA_SERVER_URL');
     if (!backendUrl) {
-      if (window.location.protocol.startsWith('http') && window.location.port === '3000') {
+      if (window.location.protocol.startsWith('http') && window.location.hostname && !window.location.hostname.includes('localhost')) {
+        backendUrl = window.location.origin;
+      } else if (window.location.protocol.startsWith('http') && (window.location.port === '3000' || window.location.hostname === 'localhost')) {
         backendUrl = window.location.origin;
       } else {
-        backendUrl = 'http://192.168.0.112:3000';
+        backendUrl = 'https://whatsapp-bulk-sender-swkd.onrender.com';
       }
     }
     // Clean trailing slash
