@@ -1,0 +1,10 @@
+node_modules/
+.wwebjs_auth/
+uploads/
+*.apk
+.env
+.DS_Store
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties

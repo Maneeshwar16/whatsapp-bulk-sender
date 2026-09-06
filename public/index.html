@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp Direct Sender</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="header-top-row">
+        <h1>📱 WhatsApp Direct Sender</h1>
+        <button id="theme-toggle-btn" class="btn btn-outline btn-small theme-toggle-btn" title="Toggle Light / Dark theme">
+          🌙 Dark Mode
+        </button>
+      </div>
+      <p class="subtitle">Select individual contacts or recent chats &amp; send custom messages with documents &amp; images</p>
+      <div class="server-config-bar">
+        <span>🌐 Backend: <code id="server-url-display">http://192.168.0.112:3000</code></span>
+        <button id="change-server-btn" class="btn-text">⚙️ Configure Server IP</button>
+      </div>
+    </header>
+
+    <!-- Connection Status -->
+    <section id="connection-section" class="card">
+      <h2>WhatsApp Connection</h2>
+      <div id="status-area">
+        <div id="loading-state" class="status-box">
+          <div class="spinner"></div>
+          <p id="loading-text">Initializing WhatsApp client…</p>
+        </div>
+        <div id="server-error-state" class="status-box hidden">
+          <div class="connection-error-box">
+            <span class="badge badge-red">⚠️ Cannot Connect to Server</span>
+            <p>Could not reach the PC server at <code id="err-server-url">http://192.168.0.112:3000</code></p>
+            <ul class="error-checklist">
+              <li>Make sure <strong>npm start</strong> is running on your PC.</li>
+              <li>Make sure your phone is connected to the <strong>same Wi-Fi network</strong> as your PC.</li>
+              <li>If your PC's Wi-Fi IP address changed, update it below.</li>
+            </ul>
+            <div class="error-actions">
+              <button id="retry-connect-btn" class="btn btn-primary btn-small">🔄 Retry Connection</button>
+              <button id="err-change-server-btn" class="btn btn-outline btn-small">⚙️ Configure Server IP</button>
+            </div>
+          </div>
+        </div>
+        <div id="qr-state" class="status-box hidden">
+          <p><strong>Scan this QR code with your phone:</strong><br>
+            <small>Open WhatsApp → Settings (or three dots) → Linked Devices → Link a Device</small>
+          </p>
+          <img id="qr-image" alt="QR Code" />
+        </div>
+        <div id="ready-state" class="status-box hidden">
+          <div class="status-header-row">
+            <span class="badge badge-green">✅ WhatsApp Connected</span>
+            <button id="refresh-contacts-btn" class="btn btn-outline btn-small" title="Reload contacts from WhatsApp">
+              🔄 Refresh Contacts
+            </button>
+          </div>
+          <p class="status-desc">Your WhatsApp session is active. Choose your contacts below to broadcast.</p>
+        </div>
+        <div id="disconnected-state" class="status-box hidden">
+          <span class="badge badge-red">🔌 Disconnected</span>
+          <p>WhatsApp disconnected. Reconnecting automatically…</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Content -->
+    <div class="main-grid">
+      <!-- Left Column: Contact Selector & Composer -->
+      <section class="card compose-section">
+        <!-- Mode Switcher -->
+        <div class="section-tabs">
+          <button id="tab-contacts" class="tab-btn active">👥 Select Contacts</button>
+          <button id="tab-manual" class="tab-btn">📝 Manual / CSV</button>
+        </div>
+
+        <!-- Mode 1: Contact Picker -->
+        <div id="contacts-picker-view">
+          <div class="search-box-row">
+            <input
+              type="text"
+              id="contact-search"
+              placeholder="🔍 Search contacts by name or phone..."
+              autocomplete="off"
+            />
+          </div>
+
+          <!-- Filter tags -->
+          <div class="filter-pills">
+            <button class="pill-btn active" data-filter="saved">⭐ Saved Contacts (<span id="count-saved">0</span>)</button>
+            <button class="pill-btn" data-filter="recent">🕒 Recent 1-on-1 Chats (<span id="count-recent">0</span>)</button>
+            <button class="pill-btn" data-filter="selected">Selected (<span id="count-selected-filter">0</span>)</button>
+          </div>
+
+          <!-- Quick action bar -->
+          <div class="quick-actions">
+            <button id="select-all-btn" class="btn-text">Select All Filtered</button>
+            <span class="divider">|</span>
+            <button id="deselect-all-btn" class="btn-text">Clear Selection</button>
+          </div>
+
+          <!-- Selected Contact Chips -->
+          <div id="selected-chips-container" class="selected-chips-wrapper hidden">
+            <div class="chips-title">
+              <strong>Selected (<span id="chips-count">0</span>):</strong>
+            </div>
+            <div id="selected-chips" class="chips-list"></div>
+          </div>
+
+          <!-- Contact List Box -->
+          <div class="contacts-list-container">
+            <div id="contacts-loading" class="contacts-placeholder">
+              <div class="spinner small"></div>
+              <span>Loading your WhatsApp contacts &amp; chats…</span>
+            </div>
+            <div id="contacts-empty" class="contacts-placeholder hidden">
+              <span>No contacts match your search.</span>
+            </div>
+            <ul id="contacts-list" class="contacts-ul hidden"></ul>
+          </div>
+        </div>
+
+        <!-- Mode 2: Manual Numbers / CSV Upload -->
+        <div id="manual-picker-view" class="hidden">
+          <div class="form-group">
+            <label for="recipients-manual">
+              Phone Numbers
+              <span class="count" id="manual-count">(0 numbers)</span>
+            </label>
+            <textarea
+              id="recipients-manual"
+              placeholder="Enter phone numbers with country code, one per line&#10;&#10;Example:&#10;919876543210&#10;14155552671&#10;447911123456"
+              rows="6"
+            ></textarea>
+            <div class="upload-row">
+              <label class="btn btn-outline btn-small" for="csv-upload">
+                📂 Upload CSV / TXT
+              </label>
+              <input type="file" id="csv-upload" accept=".csv,.txt" hidden />
+              <span id="csv-filename" class="hint"></span>
+            </div>
+          </div>
+        </div>
+
+        <hr class="section-divider" />
+
+        <!-- Message Body -->
+        <div class="form-group">
+          <label for="message">Message</label>
+          <textarea
+            id="message"
+            placeholder="Type your message here…"
+            rows="4"
+          ></textarea>
+        </div>
+
+        <!-- Attachments (PDF, Word, Images, etc.) -->
+        <div class="form-group">
+          <div class="image-label-row">
+            <label>Attachments <small>(PDF, Word, Images, etc. — max 10)</small></label>
+            <label class="btn btn-outline btn-small" for="file-upload">
+              📎 Attach Files
+            </label>
+          </div>
+          <input
+            type="file"
+            id="file-upload"
+            accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt"
+            multiple
+            hidden
+          />
+          <div id="file-previews" class="file-previews"></div>
+        </div>
+
+        <!-- Send Button -->
+        <button id="send-btn" class="btn btn-primary" disabled>
+          🚀 Send to 0 Contact(s)
+        </button>
+      </section>
+
+      <!-- Right Column: Delivery Progress -->
+      <section class="card progress-section">
+        <h2>
+          Delivery Progress
+          <span id="progress-summary" class="hint"></span>
+        </h2>
+
+        <!-- Progress Bar -->
+        <div id="progress-bar-wrapper" class="progress-bar-wrapper hidden">
+          <div class="progress-bar">
+            <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
+          </div>
+          <span id="progress-percent" class="hint">0%</span>
+        </div>
+
+        <!-- Status Table -->
+        <div id="progress-table-wrapper">
+          <p id="progress-placeholder" class="hint">
+            Select your contacts, type your message, and click Send. Real-time delivery progress will display here.
+          </p>
+          <table id="progress-table" class="hidden">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Recipient</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="progress-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Completion Banner -->
+        <div id="complete-banner" class="complete-banner hidden"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Socket.IO client (bundled locally for mobile APK support) -->
+  <script src="socket.io.min.js"></script>
+
+  <script>
+    // ── Backend URL Setup (Supports Web + Android APK) ─────────────────────
+    let backendUrl = localStorage.getItem('WA_SERVER_URL');
+    if (!backendUrl) {
+      if (window.location.protocol.startsWith('http') && window.location.port === '3000') {
+        backendUrl = window.location.origin;
+      } else {
+        backendUrl = 'http://192.168.0.112:3000';
+      }
+    }
+    // Clean trailing slash
+    backendUrl = backendUrl.replace(/\/+$/, '');
+
+    const serverUrlDisplay = document.getElementById('server-url-display');
+    const changeServerBtn  = document.getElementById('change-server-btn');
+    if (serverUrlDisplay) serverUrlDisplay.textContent = backendUrl;
+
+    function promptChangeServerIp() {
+      const input = prompt('Enter WhatsApp Sender Server IP or URL:\n(e.g., http://192.168.0.112:3000)', backendUrl);
+      if (input && input.trim()) {
+        let clean = input.trim().replace(/\/+$/, '');
+        if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+          clean = 'http://' + clean;
+        }
+        localStorage.setItem('WA_SERVER_URL', clean);
+        window.location.reload();
+      }
+    }
+
+    if (changeServerBtn) {
+      changeServerBtn.addEventListener('click', promptChangeServerIp);
+    }
+
+    // ── Elements ───────────────────────────────────────────────────────────
+    const loadingState      = document.getElementById('loading-state');
+    const serverErrorState  = document.getElementById('server-error-state');
+    const errServerUrl      = document.getElementById('err-server-url');
+    const retryConnectBtn   = document.getElementById('retry-connect-btn');
+    const errChangeServerBtn= document.getElementById('err-change-server-btn');
+    const qrState           = document.getElementById('qr-state');
+    const qrImage           = document.getElementById('qr-image');
+    const readyState        = document.getElementById('ready-state');
+    const disconnectedState = document.getElementById('disconnected-state');
+    const refreshContactsBtn= document.getElementById('refresh-contacts-btn');
+
+    if (errServerUrl) errServerUrl.textContent = backendUrl;
+    if (errChangeServerBtn) errChangeServerBtn.addEventListener('click', promptChangeServerIp);
+    if (retryConnectBtn) {
+      retryConnectBtn.addEventListener('click', () => {
+        showStatus('loading');
+        checkBackendConnection(true);
+      });
+    }
+
+    // Tabs
+    const tabContacts       = document.getElementById('tab-contacts');
+    const tabManual         = document.getElementById('tab-manual');
+    const contactsPickerView= document.getElementById('contacts-picker-view');
+    const manualPickerView  = document.getElementById('manual-picker-view');
+
+    // Contacts
+    const contactSearch     = document.getElementById('contact-search');
+    const contactsList      = document.getElementById('contacts-list');
+    const contactsLoading   = document.getElementById('contacts-loading');
+    const contactsEmpty     = document.getElementById('contacts-empty');
+    const selectAllBtn      = document.getElementById('select-all-btn');
+    const deselectAllBtn    = document.getElementById('deselect-all-btn');
+    const selectedChipsWrap = document.getElementById('selected-chips-container');
+    const selectedChipsList = document.getElementById('selected-chips');
+    const chipsCount        = document.getElementById('chips-count');
+
+    // Filter counts
+    const countAll          = document.getElementById('count-all');
+    const countRecent       = document.getElementById('count-recent');
+    const countSaved        = document.getElementById('count-saved');
+    const countSelectedFilter = document.getElementById('count-selected-filter');
+    const filterPills       = document.querySelectorAll('.pill-btn');
+
+    // Manual input
+    const recipientsManual  = document.getElementById('recipients-manual');
+    const manualCount       = document.getElementById('manual-count');
+    const csvUpload         = document.getElementById('csv-upload');
+    const csvFilename       = document.getElementById('csv-filename');
+
+    // Composer
+    const messageEl         = document.getElementById('message');
+    const fileUpload        = document.getElementById('file-upload');
+    const filePreviews      = document.getElementById('file-previews');
+    const sendBtn           = document.getElementById('send-btn');
+    const themeToggleBtn    = document.getElementById('theme-toggle-btn');
+
+    // Progress
+    const progressBarWrapper= document.getElementById('progress-bar-wrapper');
+    const progressBarFill   = document.getElementById('progress-bar-fill');
+    const progressPercent   = document.getElementById('progress-percent');
+    const progressPlaceholder = document.getElementById('progress-placeholder');
+    const progressTable     = document.getElementById('progress-table');
+    const progressTbody     = document.getElementById('progress-tbody');
+    const progressSummary   = document.getElementById('progress-summary');
+    const completeBanner    = document.getElementById('complete-banner');
+
+    // ── State ──────────────────────────────────────────────────────────────
+    let isConnected = false;
+    let isSending = false;
+    let currentMode = 'contacts'; // 'contacts' or 'manual'
+    let currentFilter = 'saved';   // 'saved', 'recent', 'selected'
+    let searchQuery = '';
+
+    let recentChats = [];
+    let allContacts = [];
+    let combinedItems = [];       // Deduped list of all available entries
+    let selectedContactsMap = new Map(); // id -> { id, name, number }
+    let selectedFiles = [];
+
+    // ── Theme Switcher ───────────────────────────────────────────────────────
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('WA_THEME', theme);
+      if (themeToggleBtn) {
+        themeToggleBtn.textContent = theme === 'dark' ? '☀️ Light Mode' : '🌙 Dark Mode';
+      }
+    }
+
+    const savedTheme = localStorage.getItem('WA_THEME') ||
+      (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    applyTheme(savedTheme);
+
+    if (themeToggleBtn) {
+      themeToggleBtn.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme') || 'light';
+        applyTheme(current === 'dark' ? 'light' : 'dark');
+      });
+    }
+
+    // ── Mode Switcher ──────────────────────────────────────────────────────
+    tabContacts.addEventListener('click', () => {
+      currentMode = 'contacts';
+      tabContacts.classList.add('active');
+      tabManual.classList.remove('active');
+      contactsPickerView.classList.remove('hidden');
+      manualPickerView.classList.add('hidden');
+      updateSendButton();
+    });
+
+    tabManual.addEventListener('click', () => {
+      currentMode = 'manual';
+      tabManual.classList.add('active');
+      tabContacts.classList.remove('active');
+      manualPickerView.classList.remove('hidden');
+      contactsPickerView.classList.add('hidden');
+      updateSendButton();
+    });
+
+    // ── Filter Pills ───────────────────────────────────────────────────────
+    filterPills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        filterPills.forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        currentFilter = pill.dataset.filter;
+        renderContactsList();
+      });
+    });
+
+    // ── Socket.IO ──────────────────────────────────────────────────────────
+    const socket = io(backendUrl, {
+      transports: ['websocket', 'polling'],
+    });
+
+    socket.on('connect', () => {
+      hasConnectedToBackend = true;
+      if (initialCheckTimer) clearTimeout(initialCheckTimer);
+    });
+
+    socket.on('connect_error', (err) => {
+      console.warn('Socket connect error:', err);
+      if (!isConnected && !hasConnectedToBackend) {
+        showStatus('server-error');
+      }
+    });
+
+    socket.on('loading', () => showStatus('loading'));
+    socket.on('qr', (dataUrl) => {
+      qrImage.src = dataUrl;
+      showStatus('qr');
+    });
+    socket.on('ready', () => {
+      isConnected = true;
+      showStatus('ready');
+      loadContacts();
+      updateSendButton();
+    });
+    socket.on('disconnected', () => {
+      isConnected = false;
+      showStatus('disconnected');
+      updateSendButton();
+    });
+    socket.on('auth_failure', () => {
+      isConnected = false;
+      showStatus('disconnected');
+      updateSendButton();
+    });
+
+    socket.on('progress', (data) => {
+      updateProgressRow(data);
+    });
+
+    socket.on('complete', (data) => {
+      isSending = false;
+      sendBtn.disabled = false;
+      updateSendButton();
+
+      completeBanner.classList.remove('hidden');
+      completeBanner.innerHTML = `
+        <strong>✅ Broadcast Complete!</strong><br>
+        Sent: ${data.sentCount} &nbsp;|&nbsp; Failed: ${data.failedCount} &nbsp;|&nbsp; Total: ${data.total}
+      `;
+    });
+
+    function showStatus(state) {
+      loadingState.classList.add('hidden');
+      qrState.classList.add('hidden');
+      readyState.classList.add('hidden');
+      disconnectedState.classList.add('hidden');
+      if (serverErrorState) serverErrorState.classList.add('hidden');
+
+      const target = document.getElementById(`${state}-state`);
+      if (target) target.classList.remove('hidden');
+    }
+
+    // ── Load & Process Contacts ────────────────────────────────────────────
+    let retryCount = 0;
+    async function loadContacts(forceRefresh = false) {
+      contactsLoading.classList.remove('hidden');
+      contactsList.classList.add('hidden');
+      contactsEmpty.classList.add('hidden');
+
+      try {
+        const url = forceRefresh ? `${backendUrl}/api/contacts?refresh=true` : `${backendUrl}/api/contacts`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.error) {
+          contactsLoading.innerHTML = `<span class="error-text">⚠️ ${data.error}</span>`;
+          return;
+        }
+
+        recentChats = data.recent || [];
+        allContacts = data.contacts || [];
+
+        // Combine into unified list: prioritize recent chats first, then remaining contacts
+        const map = new Map();
+        recentChats.forEach(c => {
+          map.set(c.id, { ...c, isRecent: true });
+        });
+        allContacts.forEach(c => {
+          if (!map.has(c.id)) {
+            map.set(c.id, { ...c, isRecent: false });
+          } else {
+            map.get(c.id).isMyContact = c.isMyContact;
+          }
+        });
+
+        combinedItems = Array.from(map.values());
+        updateFilterCounts();
+
+        // If WhatsApp web is still syncing chats right after login, retry after 2s
+        if (combinedItems.length === 0 && retryCount < 4) {
+          retryCount++;
+          contactsLoading.innerHTML = `<div class="spinner small"></div><span>Syncing WhatsApp chats (attempt ${retryCount}/4)…</span>`;
+          setTimeout(() => loadContacts(true), 2500);
+          return;
+        }
+
+        retryCount = 0;
+        renderContactsList();
+      } catch (err) {
+        contactsLoading.innerHTML = `<span class="error-text">⚠️ Failed to load contacts: ${err.message}</span>`;
+      }
+    }
+
+    refreshContactsBtn.addEventListener('click', () => {
+      loadContacts(true);
+    });
+
+    function updateFilterCounts() {
+      if (countAll) countAll.textContent = combinedItems.length;
+      if (countRecent) countRecent.textContent = recentChats.length;
+      if (countSaved) countSaved.textContent = combinedItems.filter(c => c.isMyContact).length;
+      if (countSelectedFilter) countSelectedFilter.textContent = selectedContactsMap.size;
+    }
+
+    // ── Filter & Search Contacts ───────────────────────────────────────────
+    function getFilteredContacts() {
+      const q = searchQuery.toLowerCase().trim();
+      return combinedItems.filter(contact => {
+        // Tab filter
+        if (currentFilter === 'recent' && !contact.isRecent) return false;
+        if (currentFilter === 'saved' && !contact.isMyContact) return false;
+        if (currentFilter === 'selected' && !selectedContactsMap.has(contact.id)) return false;
+
+        // Search query filter
+        if (q) {
+          const nameMatch = (contact.name || '').toLowerCase().includes(q);
+          const numMatch = (contact.number || '').includes(q);
+          return nameMatch || numMatch;
+        }
+        return true;
+      });
+    }
+
+    contactSearch.addEventListener('input', (e) => {
+      searchQuery = e.target.value;
+      renderContactsList();
+    });
+
+    // ── Render Contacts List ───────────────────────────────────────────────
+    function renderContactsList() {
+      contactsLoading.classList.add('hidden');
+      const filtered = getFilteredContacts();
+
+      if (filtered.length === 0) {
+        contactsList.classList.add('hidden');
+        contactsEmpty.classList.remove('hidden');
+        return;
+      }
+
+      contactsEmpty.classList.add('hidden');
+      contactsList.classList.remove('hidden');
+      contactsList.innerHTML = '';
+
+      filtered.forEach(contact => {
+        const isChecked = selectedContactsMap.has(contact.id);
+        const li = document.createElement('li');
+        li.className = `contact-item ${isChecked ? 'selected' : ''}`;
+        li.dataset.id = contact.id;
+
+        const initial = (contact.name || '?').charAt(0).toUpperCase();
+        const tagsHtml = contact.isRecent ? '<span class="tag-recent">Recent</span>' : '';
+
+        li.innerHTML = `
+          <input type="checkbox" class="contact-checkbox" ${isChecked ? 'checked' : ''} />
+          <div class="avatar">${initial}</div>
+          <div class="contact-info">
+            <div class="contact-name">
+              <span>${escapeHtml(contact.name || contact.number)}</span>
+              ${tagsHtml}
+            </div>
+            <div class="contact-number">+${escapeHtml(contact.number)}</div>
+          </div>
+        `;
+
+        li.addEventListener('click', (e) => {
+          if (e.target.tagName !== 'INPUT') {
+            const cb = li.querySelector('.contact-checkbox');
+            cb.checked = !cb.checked;
+          }
+          toggleContactSelection(contact);
+        });
+
+        contactsList.appendChild(li);
+      });
+    }
+
+    function toggleContactSelection(contact) {
+      if (selectedContactsMap.has(contact.id)) {
+        selectedContactsMap.delete(contact.id);
+      } else {
+        selectedContactsMap.set(contact.id, {
+          id: contact.id,
+          name: contact.name || contact.number,
+          number: contact.number
+        });
+      }
+      renderSelectedChips();
+      updateFilterCounts();
+      updateSendButton();
+
+      // Update list item UI
+      const li = contactsList.querySelector(`[data-id="${contact.id}"]`);
+      if (li) {
+        const isChecked = selectedContactsMap.has(contact.id);
+        li.classList.toggle('selected', isChecked);
+        const cb = li.querySelector('.contact-checkbox');
+        if (cb) cb.checked = isChecked;
+      }
+    }
+
+    // ── Selected Chips ─────────────────────────────────────────────────────
+    function renderSelectedChips() {
+      const selected = Array.from(selectedContactsMap.values());
+      chipsCount.textContent = selected.length;
+
+      if (selected.length === 0) {
+        selectedChipsWrap.classList.add('hidden');
+        selectedChipsList.innerHTML = '';
+        return;
+      }
+
+      selectedChipsWrap.classList.remove('hidden');
+      selectedChipsList.innerHTML = '';
+
+      selected.forEach(c => {
+        const chip = document.createElement('div');
+        chip.className = 'contact-chip';
+        chip.innerHTML = `
+          <span>${escapeHtml(c.name)}</span>
+          <button type="button" class="chip-remove" title="Remove">✕</button>
+        `;
+
+        chip.querySelector('.chip-remove').addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleContactSelection(c);
+        });
+
+        selectedChipsList.appendChild(chip);
+      });
+    }
+
+    // ── Quick Action Buttons ───────────────────────────────────────────────
+    selectAllBtn.addEventListener('click', () => {
+      const filtered = getFilteredContacts();
+      filtered.forEach(c => {
+        selectedContactsMap.set(c.id, {
+          id: c.id,
+          name: c.name || c.number,
+          number: c.number
+        });
+      });
+      renderContactsList();
+      renderSelectedChips();
+      updateFilterCounts();
+      updateSendButton();
+    });
+
+    deselectAllBtn.addEventListener('click', () => {
+      selectedContactsMap.clear();
+      renderContactsList();
+      renderSelectedChips();
+      updateFilterCounts();
+      updateSendButton();
+    });
+
+    // ── Manual Input / CSV Support ─────────────────────────────────────────
+    recipientsManual.addEventListener('input', () => {
+      const nums = getManualNumbers();
+      manualCount.textContent = `(${nums.length} number${nums.length !== 1 ? 's' : ''})`;
+      updateSendButton();
+    });
+
+    function getManualNumbers() {
+      return recipientsManual.value
+        .split('\n')
+        .map(n => n.replace(/[^\d]/g, '').trim())
+        .filter(n => n.length >= 7);
+    }
+
+    csvUpload.addEventListener('change', async () => {
+      const file = csvUpload.files[0];
+      if (!file) return;
+
+      csvFilename.textContent = `Uploading ${file.name}…`;
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const resp = await fetch(`${backendUrl}/api/upload-contacts`, { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        if (data.error) {
+          csvFilename.textContent = `❌ ${data.error}`;
+          return;
+        }
+
+        const existing = recipientsManual.value.trim();
+        const newNumbers = data.numbers.join('\n');
+        recipientsManual.value = existing ? `${existing}\n${newNumbers}` : newNumbers;
+
+        csvFilename.textContent = `✅ Loaded ${data.numbers.length} numbers from ${file.name}`;
+        const nums = getManualNumbers();
+        manualCount.textContent = `(${nums.length} number${nums.length !== 1 ? 's' : ''})`;
+        updateSendButton();
+      } catch (err) {
+        csvFilename.textContent = `❌ Upload failed: ${err.message}`;
+      }
+
+      csvUpload.value = '';
+    });
+
+    // ── File Attachments (Images, PDFs, Word, etc.) ─────────────────────────
+    fileUpload.addEventListener('change', () => {
+      const files = Array.from(fileUpload.files);
+      selectedFiles = files.slice(0, 10);
+      renderFilePreviews();
+      updateSendButton();
+    });
+
+    function formatFileSize(bytes) {
+      if (!bytes) return '0 B';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function getDocIcon(name) {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      if (ext === 'pdf') return '📕';
+      if (['doc', 'docx'].includes(ext)) return '📘';
+      if (['xls', 'xlsx', 'csv'].includes(ext)) return '📊';
+      if (['ppt', 'pptx'].includes(ext)) return '📙';
+      if (ext === 'txt') return '📝';
+      if (['zip', 'rar', '7z'].includes(ext)) return '🗜️';
+      return '📄';
+    }
+
+    function renderFilePreviews() {
+      filePreviews.innerHTML = '';
+      selectedFiles.forEach((file, i) => {
+        const isImage = file.type.startsWith('image/');
+        let wrapper;
+
+        if (isImage) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'image-preview-item';
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(file);
+          img.alt = file.name;
+          wrapper.appendChild(img);
+        } else {
+          wrapper = document.createElement('div');
+          wrapper.className = 'doc-preview-item';
+          wrapper.innerHTML = `
+            <span class="doc-icon">${getDocIcon(file.name)}</span>
+            <div class="doc-info">
+              <div class="doc-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+              <div class="doc-size">${formatFileSize(file.size)}</div>
+            </div>
+          `;
+        }
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'file-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = 'Remove';
+        removeBtn.onclick = (e) => {
+          e.stopPropagation();
+          selectedFiles.splice(i, 1);
+          renderFilePreviews();
+          updateSendButton();
+        };
+
+        wrapper.appendChild(removeBtn);
+        filePreviews.appendChild(wrapper);
+      });
+    }
+
+    // ── Get Final Recipients ───────────────────────────────────────────────
+    function getRecipients() {
+      if (currentMode === 'contacts') {
+        return Array.from(selectedContactsMap.values());
+      } else {
+        return getManualNumbers().map(num => ({
+          id: `${num}@c.us`,
+          name: num,
+          number: num
+        }));
+      }
+    }
+
+    // ── Update Send Button ─────────────────────────────────────────────────
+    function updateSendButton() {
+      const recipients = getRecipients();
+      const count = recipients.length;
+      const hasContent = messageEl.value.trim().length > 0 || selectedFiles.length > 0;
+
+      sendBtn.textContent = `🚀 Send to ${count} Contact${count !== 1 ? 's' : ''}`;
+      sendBtn.disabled = !isConnected || count === 0 || !hasContent || isSending;
+    }
+
+    messageEl.addEventListener('input', updateSendButton);
+
+    // ── Send Broadcast ─────────────────────────────────────────────────────
+    sendBtn.addEventListener('click', async () => {
+      const recipients = getRecipients();
+      if (recipients.length === 0) return alert('Please select or enter at least one contact.');
+
+      const message = messageEl.value.trim();
+      if (!message && selectedFiles.length === 0) return alert('Please enter a message or attach files.');
+
+      const promptConfirm = `Send to ${recipients.length} individual contact(s)?\n\nEstimated time: ~${recipients.length * 1}–${recipients.length * 2} seconds (fast 1–2s delay).`;
+      if (!confirm(promptConfirm)) return;
+
+      // Reset progress
+      isSending = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = '⏳ Sending…';
+      completeBanner.classList.add('hidden');
+      progressPlaceholder.classList.add('hidden');
+      progressTable.classList.remove('hidden');
+      progressBarWrapper.classList.remove('hidden');
+      progressTbody.innerHTML = '';
+      progressBarFill.style.width = '0%';
+      progressPercent.textContent = '0%';
+      progressSummary.textContent = '';
+
+      // Populate pending rows
+      recipients.forEach((rec, i) => {
+        const row = document.createElement('tr');
+        row.id = `row-${i}`;
+        row.innerHTML = `
+          <td>${i + 1}</td>
+          <td>
+            <strong>${escapeHtml(rec.name)}</strong>
+            <br><small class="hint">+${escapeHtml(rec.number)}</small>
+          </td>
+          <td><span class="badge badge-gray">⏳ Pending</span></td>
+        `;
+        progressTbody.appendChild(row);
+      });
+
+      // Prepare request
+      const formData = new FormData();
+      formData.append('message', message);
+      formData.append('recipients', JSON.stringify(recipients));
+      selectedFiles.forEach(file => formData.append('files', file));
+
+      try {
+        const resp = await fetch(`${backendUrl}/api/send`, { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (data.error) {
+          alert('Error: ' + data.error);
+          isSending = false;
+          updateSendButton();
+        }
+      } catch (err) {
+        alert('Send request failed: ' + err.message);
+        isSending = false;
+        updateSendButton();
+      }
+    });
+
+    // ── Update Progress Row ────────────────────────────────────────────────
+    function updateProgressRow(data) {
+      const row = document.getElementById(`row-${data.index}`);
+      if (!row) return;
+
+      const statusCell = row.cells[2];
+      if (data.status === 'sent') {
+        statusCell.innerHTML = '<span class="badge badge-green">✅ Sent</span>';
+      } else {
+        statusCell.innerHTML = `<span class="badge badge-red" title="${escapeHtml(data.error || '')}">❌ Failed</span>`;
+      }
+
+      const done = data.index + 1;
+      const pct = Math.round((done / data.total) * 100);
+      progressBarFill.style.width = `${pct}%`;
+      progressPercent.textContent = `${pct}%`;
+      progressSummary.textContent = `(${data.sentCount} sent, ${data.failedCount} failed)`;
+
+      row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Initial Connection Check & Auto-Fallback ───────────────────────────
+    let hasConnectedToBackend = false;
+    let initialCheckTimer = null;
+
+    function checkBackendConnection(userInitiated = false) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4500);
+
+      fetch(`${backendUrl}/api/status`, { signal: controller.signal })
+        .then(r => r.json())
+        .then(data => {
+          clearTimeout(timeoutId);
+          hasConnectedToBackend = true;
+          if (initialCheckTimer) clearTimeout(initialCheckTimer);
+
+          if (data.ready) {
+            isConnected = true;
+            showStatus('ready');
+            loadContacts();
+            updateSendButton();
+          } else if (data.qr) {
+            qrImage.src = data.qr;
+            showStatus('qr');
+          } else {
+            showStatus('loading');
+          }
+        })
+        .catch(err => {
+          clearTimeout(timeoutId);
+          console.warn('Backend connection failed:', err);
+          if (!isConnected && !hasConnectedToBackend) {
+            showStatus('server-error');
+          }
+        });
+    }
+
+    checkBackendConnection();
+
+    // If after 4.5 seconds still not connected and in loading state, show server error
+    initialCheckTimer = setTimeout(() => {
+      if (!hasConnectedToBackend && !isConnected && !loadingState.classList.contains('hidden')) {
+        showStatus('server-error');
+      }
+    }, 4500);
+  </script>
+</body>
+</html>

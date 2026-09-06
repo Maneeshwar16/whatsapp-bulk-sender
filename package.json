@@ -1,0 +1,23 @@
+{
+  "name": "whatsapp-bulk-sender",
+  "version": "1.0.0",
+  "description": "Send the same message (with optional images) to multiple WhatsApp contacts individually",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "postinstall": "node patch-wwebjs.js"
+  },
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "express": "^4.21.0",
+    "multer": "^2.3.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.0",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^7.6.9",
+    "@capacitor/core": "^8.5.1"
+  }
+}

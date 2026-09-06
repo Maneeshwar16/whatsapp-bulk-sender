@@ -1,0 +1,8 @@
+node_modules
+android
+.git
+.wwebjs_auth
+uploads
+*.apk
+.env
+.DS_Store

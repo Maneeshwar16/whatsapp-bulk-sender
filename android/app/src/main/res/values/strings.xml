@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">WA Direct Sender</string>
+    <string name="title_activity_main">WA Direct Sender</string>
+    <string name="package_name">com.whatsapp.bulksender</string>
+    <string name="custom_url_scheme">com.whatsapp.bulksender</string>
+</resources>

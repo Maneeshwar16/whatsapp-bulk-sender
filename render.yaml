@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: whatsapp-bulk-sender
+    env: docker
+    plan: starter
+    healthCheckPath: /api/status
+    disk:
+      name: wa-session-data
+      mountPath: /app/.wwebjs_auth
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: DATA_PATH
+        value: /app/.wwebjs_auth
