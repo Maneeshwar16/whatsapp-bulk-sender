@@ -1,3 +1,5 @@
+try { require('./patch-wwebjs'); } catch (_) {}
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');

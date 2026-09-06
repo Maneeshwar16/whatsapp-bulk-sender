@@ -4,8 +4,7 @@
   "description": "Send the same message (with optional images) to multiple WhatsApp contacts individually",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "postinstall": "node patch-wwebjs.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "csv-parse": "^5.6.0",

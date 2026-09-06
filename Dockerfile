@@ -5,14 +5,17 @@ USER root
 
 WORKDIR /app
 
-# Copy dependency files and postinstall patch script
-COPY package*.json patch-wwebjs.js ./
+# Copy dependency files
+COPY package*.json ./
 
-# Install production dependencies and trigger postinstall patch
-RUN npm ci --omit=dev || npm install --omit=dev
+# Install production dependencies without running scripts prematurely
+RUN npm ci --omit=dev --ignore-scripts || npm install --omit=dev --ignore-scripts
 
 # Copy application source code
 COPY . .
+
+# Run patch after all files are copied
+RUN node patch-wwebjs.js
 
 # Set permissions for the application folder
 RUN chown -R pptruser:pptruser /app
