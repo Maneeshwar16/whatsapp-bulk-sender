@@ -84,6 +84,11 @@ waClient.on('qr', async (qr) => {
   io.emit('qr', qrCodeDataUrl);
 });
 
+waClient.on('code_received', (code) => {
+  console.log('🔑 WhatsApp pairing code received:', code);
+  io.emit('pairing_code', code);
+});
+
 waClient.on('ready', async () => {
   clientReady = true;
   qrCodeDataUrl = null;
@@ -303,6 +308,34 @@ async function fetchContactsData() {
 // Connection status
 app.get('/api/status', (_req, res) => {
   res.json({ ready: clientReady, sending: isSending });
+});
+
+// Request WhatsApp pairing code (link with phone number)
+app.post('/api/pairing-code', async (req, res) => {
+  const { phone } = req.body || {};
+  if (!phone) {
+    return res.status(400).json({ error: 'Phone number is required.' });
+  }
+
+  const clean = String(phone).replace(/\D/g, '');
+  if (clean.length < 8) {
+    return res.status(400).json({ error: 'Please enter a valid phone number with country code (e.g. 919876543210).' });
+  }
+
+  if (clientReady) {
+    return res.status(400).json({ error: 'WhatsApp is already connected!' });
+  }
+
+  try {
+    console.log(`📱 Requesting pairing code for: ${clean}`);
+    const code = await waClient.requestPairingCode(clean);
+    console.log(`🔑 Pairing code generated: ${code}`);
+    io.emit('pairing_code', code);
+    res.json({ success: true, code });
+  } catch (err) {
+    console.error('Pairing code request failed:', err);
+    res.status(500).json({ error: err.message || 'Failed to request pairing code. Make sure QR code is visible.' });
+  }
 });
 
 // Fetch contacts and recent chats

@@ -47,10 +47,36 @@
           </div>
         </div>
         <div id="qr-state" class="status-box hidden">
-          <p><strong>Scan this QR code with your phone:</strong><br>
-            <small>Open WhatsApp → Settings (or three dots) → Linked Devices → Link a Device</small>
-          </p>
-          <img id="qr-image" alt="QR Code" />
+          <div class="pairing-mode-switch">
+            <button type="button" id="pairing-tab-qr" class="pairing-mode-btn active">📷 QR Code</button>
+            <button type="button" id="pairing-tab-phone" class="pairing-mode-btn">📱 Link with Phone Number</button>
+          </div>
+
+          <div id="qr-view">
+            <p><strong>Scan this QR code with WhatsApp:</strong><br>
+              <small>Open WhatsApp → Settings (or 3 dots) → Linked Devices → Link a Device</small>
+            </p>
+            <img id="qr-image" alt="QR Code" />
+          </div>
+
+          <div id="phone-view" class="hidden">
+            <p><strong>Link without camera / scanning:</strong><br>
+              <small>Enter your WhatsApp phone number with country code (e.g. <code>919876543210</code>)</small>
+            </p>
+            <div class="pairing-input-row">
+              <input type="tel" id="pairing-phone-input" placeholder="e.g. 919876543210" />
+              <button type="button" id="get-pairing-code-btn" class="btn btn-primary btn-small">Get Code</button>
+            </div>
+            <div id="pairing-loading" class="hint hidden" style="margin-top:8px;">
+              <span class="spinner small"></span> Requesting pairing code from WhatsApp…
+            </div>
+            <div id="pairing-code-display" class="pairing-code-box hidden">
+              <p class="pairing-code-label">Enter this code in WhatsApp on your phone:</p>
+              <div id="pairing-code-text" class="pairing-code-badge">--------</div>
+              <small>Open WhatsApp → <strong>Linked Devices → Link with phone number</strong></small>
+            </div>
+            <div id="pairing-error" class="error-text hidden" style="margin-top:8px;"></div>
+          </div>
         </div>
         <div id="ready-state" class="status-box hidden">
           <div class="status-header-row">
@@ -279,6 +305,84 @@
       });
     }
 
+    // ── Pairing Mode Switching & Code Request ─────────────────────────────
+    const pairingTabQr      = document.getElementById('pairing-tab-qr');
+    const pairingTabPhone   = document.getElementById('pairing-tab-phone');
+    const qrView            = document.getElementById('qr-view');
+    const phoneView         = document.getElementById('phone-view');
+    const pairingPhoneInput = document.getElementById('pairing-phone-input');
+    const getPairingCodeBtn = document.getElementById('get-pairing-code-btn');
+    const pairingLoading    = document.getElementById('pairing-loading');
+    const pairingCodeDisplay= document.getElementById('pairing-code-display');
+    const pairingCodeText   = document.getElementById('pairing-code-text');
+    const pairingError      = document.getElementById('pairing-error');
+
+    if (pairingTabQr && pairingTabPhone) {
+      pairingTabQr.addEventListener('click', () => {
+        pairingTabQr.classList.add('active');
+        pairingTabPhone.classList.remove('active');
+        qrView.classList.remove('hidden');
+        phoneView.classList.add('hidden');
+      });
+
+      pairingTabPhone.addEventListener('click', () => {
+        pairingTabPhone.classList.add('active');
+        pairingTabQr.classList.remove('active');
+        phoneView.classList.remove('hidden');
+        qrView.classList.add('hidden');
+      });
+    }
+
+    function displayPairingCode(rawCode) {
+      if (!rawCode) return;
+      let formatted = String(rawCode).trim();
+      if (formatted.length === 8 && !formatted.includes('-')) {
+        formatted = formatted.slice(0, 4) + '-' + formatted.slice(4);
+      }
+      pairingCodeText.textContent = formatted;
+      pairingCodeDisplay.classList.remove('hidden');
+      pairingError.classList.add('hidden');
+    }
+
+    if (getPairingCodeBtn) {
+      getPairingCodeBtn.addEventListener('click', async () => {
+        const phone = pairingPhoneInput.value.trim();
+        if (!phone) {
+          pairingError.textContent = 'Please enter your phone number with country code.';
+          pairingError.classList.remove('hidden');
+          return;
+        }
+
+        pairingError.classList.add('hidden');
+        pairingLoading.classList.remove('hidden');
+        pairingCodeDisplay.classList.add('hidden');
+        getPairingCodeBtn.disabled = true;
+
+        try {
+          const res = await fetch(`${backendUrl}/api/pairing-code`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone }),
+          });
+          const data = await res.json();
+          pairingLoading.classList.add('hidden');
+          getPairingCodeBtn.disabled = false;
+
+          if (data.error) {
+            pairingError.textContent = data.error;
+            pairingError.classList.remove('hidden');
+          } else if (data.code) {
+            displayPairingCode(data.code);
+          }
+        } catch (err) {
+          pairingLoading.classList.add('hidden');
+          getPairingCodeBtn.disabled = false;
+          pairingError.textContent = 'Failed to request code: ' + err.message;
+          pairingError.classList.remove('hidden');
+        }
+      });
+    }
+
     // Tabs
     const tabContacts       = document.getElementById('tab-contacts');
     const tabManual         = document.getElementById('tab-manual');
@@ -409,6 +513,9 @@
     socket.on('qr', (dataUrl) => {
       qrImage.src = dataUrl;
       showStatus('qr');
+    });
+    socket.on('pairing_code', (code) => {
+      displayPairingCode(code);
     });
     socket.on('ready', () => {
       isConnected = true;
