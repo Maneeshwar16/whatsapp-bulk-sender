@@ -1,30 +1,21 @@
-# Official Puppeteer image with Node.js and Google Chrome pre-installed
-FROM ghcr.io/puppeteer/puppeteer:22
-
-USER root
+# Lightweight Node.js image (no Chrome, ultra-fast build, ~40MB RAM)
+FROM node:20-alpine
 
 WORKDIR /app
 
 # Copy dependency files
 COPY package*.json ./
 
-# Install production dependencies without running scripts prematurely
-RUN npm ci --omit=dev --ignore-scripts || npm install --omit=dev --ignore-scripts
+# Install production dependencies
+RUN npm ci --omit=dev || npm install --omit=dev
 
 # Copy application source code
 COPY . .
-
-# Run patch after all files are copied
-RUN node patch-wwebjs.js
-
-# Set permissions for the application folder
-RUN chown -R pptruser:pptruser /app
-
-USER pptruser
 
 ENV NODE_ENV=production \
     PORT=3000
 
 EXPOSE 3000
 
-CMD ["node", "--expose-gc", "--max-old-space-size=256", "server.js"]
+CMD ["node", "server.js"]
+

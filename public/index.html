@@ -89,12 +89,24 @@
             <button type="button" id="reconnect-btn" class="btn-text btn-small">🔄 Reset Session / Generate New QR</button>
           </div>
         </div>
+        <div id="engine-stopped-state" class="status-box hidden">
+          <div class="engine-sleep-box" style="padding: 16px; text-align: center;">
+            <span class="badge badge-gray" style="font-size: 0.95rem; margin-bottom: 8px;">💤 Engine in Sleep Mode</span>
+            <p style="color: var(--text-muted); font-size: 0.9rem; margin: 8px 0 14px;">WhatsApp is resting in zero-RAM standby mode to save phone and PC battery.</p>
+            <button id="wake-engine-btn" class="btn btn-primary" type="button" style="padding: 10px 24px; font-size: 1rem;">
+              ⚡ Start WhatsApp Engine
+            </button>
+          </div>
+        </div>
         <div id="ready-state" class="status-box hidden">
           <div class="status-header-row">
             <span class="badge badge-green">✅ WhatsApp Connected</span>
-            <div style="display: flex; gap: 8px;">
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
               <button id="refresh-contacts-btn" class="btn btn-outline btn-small" title="Reload contacts from WhatsApp">
                 🔄 Refresh Contacts
+              </button>
+              <button id="sleep-engine-btn" class="btn btn-outline btn-small" title="Put WhatsApp engine to sleep to save memory & battery">
+                💤 Sleep Engine
               </button>
               <button id="logout-btn" class="btn btn-outline btn-small btn-danger" title="Unlink WhatsApp session">
                 🚪 Logout
@@ -222,6 +234,13 @@
         <button id="send-btn" class="btn btn-primary" disabled>
           🚀 Send to 0 Contact(s)
         </button>
+
+        <div class="auto-sleep-row" style="margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted);">
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="auto-sleep-toggle" checked />
+            <span>💤 Auto-sleep engine after broadcast finishes (0% RAM)</span>
+          </label>
+        </div>
       </section>
 
       <!-- Right Column: Delivery Progress -->
@@ -399,6 +418,25 @@
           updateSendButton();
           completeBanner.innerHTML = `🏁 <strong>Broadcast complete!</strong> Sent: <b>${summary.sentCount}</b> | Failed: <b>${summary.failedCount}</b> | Total: <b>${summary.total}</b>`;
           completeBanner.classList.remove('hidden');
+
+          const autoSleep = document.getElementById('auto-sleep-toggle');
+          if (autoSleep && autoSleep.checked) {
+            console.log('💤 Auto-sleep triggered: putting engine to sleep in 3s...');
+            setTimeout(async () => {
+              try {
+                await fetch(`${backendUrl}/api/engine/stop`, { method: 'POST' });
+                showStatus('engine-stopped');
+              } catch (_) {}
+            }, 3000);
+          }
+        });
+
+        socket.on('engine_state', ({ running }) => {
+          if (!running) {
+            showStatus('engine-stopped');
+          } else {
+            checkBackendConnection(true);
+          }
         });
       }
     } catch (e) {
@@ -811,9 +849,53 @@
       readyState.classList.add('hidden');
       disconnectedState.classList.add('hidden');
       if (serverErrorState) serverErrorState.classList.add('hidden');
+      const engineStoppedState = document.getElementById('engine-stopped-state');
+      if (engineStoppedState) engineStoppedState.classList.add('hidden');
 
       const target = document.getElementById(`${state}-state`);
       if (target) target.classList.remove('hidden');
+    }
+
+    const wakeEngineBtn  = document.getElementById('wake-engine-btn');
+    const sleepEngineBtn = document.getElementById('sleep-engine-btn');
+
+    if (wakeEngineBtn) {
+      wakeEngineBtn.addEventListener('click', async () => {
+        wakeEngineBtn.disabled = true;
+        wakeEngineBtn.textContent = '⏳ Starting WhatsApp Engine…';
+        showStatus('loading');
+        try {
+          await fetch(`${backendUrl}/api/engine/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: currentSessionId }),
+          });
+          setTimeout(() => {
+            wakeEngineBtn.disabled = false;
+            wakeEngineBtn.textContent = '⚡ Start WhatsApp Engine';
+            checkBackendConnection(true);
+          }, 1500);
+        } catch (err) {
+          wakeEngineBtn.disabled = false;
+          wakeEngineBtn.textContent = '⚡ Start WhatsApp Engine';
+          alert('Failed to start engine: ' + err.message);
+        }
+      });
+    }
+
+    if (sleepEngineBtn) {
+      sleepEngineBtn.addEventListener('click', async () => {
+        if (!confirm('Put WhatsApp engine to sleep? This closes Chrome and frees 100% of memory.')) return;
+        sleepEngineBtn.disabled = true;
+        try {
+          await fetch(`${backendUrl}/api/engine/stop`, { method: 'POST' });
+          sleepEngineBtn.disabled = false;
+          showStatus('engine-stopped');
+        } catch (err) {
+          sleepEngineBtn.disabled = false;
+          alert('Failed to sleep engine: ' + err.message);
+        }
+      });
     }
 
     // ── Load & Process Contacts ────────────────────────────────────────────
@@ -1275,7 +1357,9 @@
           hasConnectedToBackend = true;
           if (initialCheckTimer) clearTimeout(initialCheckTimer);
 
-          if (data.ready) {
+          if (data.engineRunning === false) {
+            showStatus('engine-stopped');
+          } else if (data.ready) {
             isConnected = true;
             showStatus('ready');
             loadContacts();

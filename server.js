@@ -1,14 +1,23 @@
-try { require('./patch-wwebjs'); } catch (_) {}
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
+import multer from 'multer';
+import qrcode from 'qrcode';
+import { parse } from 'csv-parse/sync';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const multer = require('multer');
-const qrcode = require('qrcode');
-const { parse } = require('csv-parse/sync');
-const path = require('path');
-const fs = require('fs');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ─── Express + Socket.IO Setup ───────────────────────────────────────────────
 
@@ -48,20 +57,8 @@ const upload = multer({
 
 // ─── Sessions Manifest & Auth Storage ───────────────────────────────────────
 
-const authDataPath = process.env.DATA_PATH || './.wwebjs_auth/';
+const authDataPath = process.env.DATA_PATH || path.join(__dirname, '.baileys_auth');
 if (!fs.existsSync(authDataPath)) fs.mkdirSync(authDataPath, { recursive: true });
-
-// Auto-migrate legacy single-session folder if present
-const legacySessionDir = path.join(authDataPath, 'session');
-const defaultSessionDir = path.join(authDataPath, 'session-default');
-if (fs.existsSync(legacySessionDir) && !fs.existsSync(defaultSessionDir)) {
-  try {
-    fs.renameSync(legacySessionDir, defaultSessionDir);
-    console.log('📦 Migrated legacy single-session directory to session-default.');
-  } catch (e) {
-    console.warn('Migration note:', e.message);
-  }
-}
 
 const SESSIONS_MANIFEST_FILE = path.join(__dirname, 'sessions.json');
 
@@ -85,119 +82,200 @@ function saveSessionsManifest(list) {
   }
 }
 
-// ─── WhatsApp Multi-Session Manager ─────────────────────────────────────────
+// ─── WhatsApp Baileys Multi-Session Manager ─────────────────────────────────
 
-const puppeteerExecutablePath =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-   fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
-
-// sessions: Map<sessionId, SessionData>
 const sessions = new Map();
+let engineRunning = true;
 
-function createSession(id, name) {
+async function createSession(id, name) {
   if (sessions.has(id)) {
     return sessions.get(id);
   }
 
-  console.log(`🚀 [${id}] Initializing WhatsApp session ("${name}")...`);
+  console.log(`🚀 [${id}] Initializing Baileys WhatsApp session ("${name}")...`);
 
-  const client = new Client({
-    authStrategy: new LocalAuth({
-      clientId: id,
-      dataPath: authDataPath,
-    }),
-    puppeteer: {
-      headless: true,
-      executablePath: puppeteerExecutablePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-default-apps',
-        '--mute-audio',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-breakpad',
-        '--disable-component-extensions-with-background-pages',
-        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-        '--disable-ipc-flooding-protection',
-        '--disable-renderer-backgrounding',
-        '--force-color-profile=srgb',
-        '--metrics-recording-only',
-        '--js-flags=--max-old-space-size=256',
-      ],
-    },
+  const sessionDir = path.join(authDataPath, `session-${id}`);
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    browser: Browsers.macOS('Desktop'),
+    syncFullHistory: false,
+    markOnlineOnConnect: true,
+    generateHighQualityLinkPreview: false,
   });
 
   const session = {
     id,
     name: name || id,
-    client,
+    sock,
     ready: false,
     qrCodeDataUrl: null,
     pairingCode: null,
     isSending: false,
-    cachedContacts: null,
+    contactsMap: new Map(), // jid -> { id, name, notify, verifiedName, isSaved }
+    chatsMap: new Map(),    // jid -> { id, name, timestamp, unreadCount }
     createdAt: Date.now(),
   };
 
   sessions.set(id, session);
 
-  client.on('qr', async (qr) => {
-    console.log(`[${id}] QR code received — scan it with your phone.`);
-    session.qrCodeDataUrl = await qrcode.toDataURL(qr);
-    io.to(id).emit('qr', session.qrCodeDataUrl);
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log(`[${id}] 📷 QR code received — ready for scan.`);
+      session.qrCodeDataUrl = await qrcode.toDataURL(qr);
+      io.to(id).emit('qr', session.qrCodeDataUrl);
+    }
+
+    if (connection === 'close') {
+      const statusCode = (lastDisconnect?.error instanceof Boom)
+        ? lastDisconnect.error.output?.statusCode
+        : (lastDisconnect?.error)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      session.ready = false;
+      session.qrCodeDataUrl = null;
+      console.log(`[${id}] 🔌 Disconnected (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
+      io.to(id).emit('disconnected', statusCode);
+
+      if (shouldReconnect && engineRunning) {
+        sessions.delete(id);
+        createSession(id, name).catch((err) => console.error(`[${id}] Reconnect error:`, err));
+      }
+    } else if (connection === 'open') {
+      session.ready = true;
+      session.qrCodeDataUrl = null;
+      session.pairingCode = null;
+      console.log(`[${id}] ✅ Baileys WhatsApp client is connected and ready! (RAM: ~40MB)`);
+      io.to(id).emit('ready');
+    }
   });
 
-  client.on('code_received', (code) => {
-    console.log(`[${id}] 🔑 Pairing code received:`, code);
-    session.pairingCode = code;
-    io.to(id).emit('pairing_code', code);
+  // Track contacts
+  sock.ev.on('contacts.upsert', (contacts) => {
+    for (const c of contacts) {
+      if (!c.id) continue;
+      const existing = session.contactsMap.get(c.id) || {};
+      session.contactsMap.set(c.id, {
+        id: c.id,
+        name: c.name || existing.name || '',
+        notify: c.notify || existing.notify || '',
+        verifiedName: c.verifiedName || existing.verifiedName || '',
+        isSaved: Boolean(c.name || existing.name),
+      });
+    }
   });
 
-  client.on('ready', async () => {
-    session.ready = true;
-    session.qrCodeDataUrl = null;
-    session.pairingCode = null;
-    console.log(`[${id}] ✅ WhatsApp client is ready!`);
-    io.to(id).emit('ready');
+  sock.ev.on('contacts.update', (updates) => {
+    for (const u of updates) {
+      if (!u.id) continue;
+      const existing = session.contactsMap.get(u.id) || {};
+      session.contactsMap.set(u.id, {
+        ...existing,
+        ...u,
+        isSaved: Boolean(u.name || existing.name),
+      });
+    }
   });
 
-  client.on('authenticated', () => {
-    console.log(`[${id}] 🔐 Authenticated successfully.`);
+  // Track chats
+  sock.ev.on('chats.upsert', (chats) => {
+    for (const ch of chats) {
+      if (!ch.id || !ch.id.endsWith('@s.whatsapp.net')) continue;
+      session.chatsMap.set(ch.id, {
+        id: ch.id,
+        name: ch.name || '',
+        timestamp: Number(ch.conversationTimestamp || 0) * 1000,
+        unreadCount: Number(ch.unreadCount || 0),
+      });
+    }
   });
 
-  client.on('auth_failure', (msg) => {
-    console.error(`[${id}] ❌ Authentication failure:`, msg);
-    io.to(id).emit('auth_failure', msg);
+  sock.ev.on('chats.update', (updates) => {
+    for (const u of updates) {
+      if (!u.id || !u.id.endsWith('@s.whatsapp.net')) continue;
+      const existing = session.chatsMap.get(u.id) || {};
+      session.chatsMap.set(u.id, {
+        ...existing,
+        ...u,
+        timestamp: u.conversationTimestamp ? Number(u.conversationTimestamp) * 1000 : existing.timestamp,
+      });
+    }
   });
 
-  client.on('disconnected', (reason) => {
-    session.ready = false;
-    session.cachedContacts = null;
-    console.log(`[${id}] 🔌 Disconnected:`, reason);
-    io.to(id).emit('disconnected', reason);
-    client.initialize().catch(() => {});
-  });
-
-  client.initialize().catch((err) => {
-    console.error(`[${id}] Initialization error:`, err);
+  // History sync
+  sock.ev.on('messaging-history.set', ({ chats, contacts }) => {
+    if (contacts) {
+      for (const c of contacts) {
+        if (!c.id) continue;
+        session.contactsMap.set(c.id, {
+          id: c.id,
+          name: c.name || '',
+          notify: c.notify || '',
+          verifiedName: c.verifiedName || '',
+          isSaved: Boolean(c.name),
+        });
+      }
+    }
+    if (chats) {
+      for (const ch of chats) {
+        if (!ch.id || !ch.id.endsWith('@s.whatsapp.net')) continue;
+        session.chatsMap.set(ch.id, {
+          id: ch.id,
+          name: ch.name || '',
+          timestamp: Number(ch.conversationTimestamp || 0) * 1000,
+          unreadCount: Number(ch.unreadCount || 0),
+        });
+      }
+    }
   });
 
   return session;
 }
 
-// Startup: initialize all known sessions from manifest
+// WhatsApp Engine On-Demand Controls (Sleep / Wake)
+async function stopEngine() {
+  engineRunning = false;
+  console.log('🛑 Putting WhatsApp engine to sleep (freeing memory to ~20MB)...');
+  for (const [id, session] of sessions.entries()) {
+    try {
+      if (session.sock) {
+        session.sock.end(undefined);
+      }
+    } catch (_) {}
+    session.ready = false;
+    session.qrCodeDataUrl = null;
+  }
+  sessions.clear();
+  if (global.gc) {
+    try { global.gc(); } catch (_) {}
+  }
+  io.emit('engine_state', { running: false });
+}
+
+async function startEngine(sessionId = 'default') {
+  engineRunning = true;
+  console.log(`⚡ Starting WhatsApp engine on demand for: "${sessionId}"...`);
+  const manifest = loadSessionsManifest();
+  const target = manifest.find((m) => m.id === sessionId) || manifest[0] || { id: 'default', name: 'Primary Account' };
+  const session = await createSession(target.id, target.name);
+  io.emit('engine_state', { running: true });
+  return session;
+}
+
+// Initial startup
 const initialManifest = loadSessionsManifest();
-for (const item of initialManifest) {
-  createSession(item.id, item.name);
+if (initialManifest.length > 0) {
+  createSession(initialManifest[0].id, initialManifest[0].name).catch(console.error);
 }
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
@@ -207,185 +285,77 @@ function cleanNumber(raw) {
   return String(raw).replace(/[^\d]/g, '');
 }
 
+function toJid(raw) {
+  const num = cleanNumber(raw);
+  return num ? `${num}@s.whatsapp.net` : '';
+}
+
 function randomDelay(minMs = 1000, maxMs = 2000) {
   const ms = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchContactsData(session) {
-  if (!session || !session.ready || !session.client?.pupPage) {
-    return { recent: [], contacts: [] };
-  }
+function getContactsData(session) {
+  if (!session) return { recent: [], contacts: [] };
 
-  try {
-    const data = await session.client.pupPage.evaluate(async () => {
-      const result = { recent: [], contacts: [] };
-      const safeStr = (v) => (typeof v === 'string' ? v.trim() : '');
+  const recent = [];
+  const contacts = [];
+  const seenNumbers = new Set();
 
-      const getCollections = () => {
-        try {
-          return window.require('WAWebCollections');
-        } catch {
-          return null;
-        }
-      };
+  // 1. Process recent chats (1-on-1 chats only)
+  for (const [jid, ch] of session.chatsMap.entries()) {
+    if (!jid.endsWith('@s.whatsapp.net')) continue;
+    const num = jid.split('@')[0];
+    const contactInfo = session.contactsMap.get(jid);
+    const displayName = ch.name || contactInfo?.name || contactInfo?.notify || contactInfo?.verifiedName || num;
 
-      let collections = getCollections();
-      if (!collections) {
-        await new Promise((res) => setTimeout(res, 1000));
-        collections = getCollections();
-      }
-
-      if (!collections) return result;
-
-      // 1. Extract 1-on-1 Chats (Recent)
-      try {
-        const ChatCollection = collections.Chat;
-        if (ChatCollection && typeof ChatCollection.getModelsArray === 'function') {
-          const chats = ChatCollection.getModelsArray();
-
-          for (const chat of chats) {
-            try {
-              if (!chat || !chat.id) continue;
-              const serialized = safeStr(chat.id._serialized);
-
-              // Skip groups (@g.us), broadcasts (@broadcast), and newsletters (@newsletter)
-              if (!serialized.endsWith('@c.us')) continue;
-
-              const number = safeStr(chat.id.user);
-              const name =
-                safeStr(chat.name) ||
-                safeStr(chat.formattedTitle) ||
-                safeStr(chat.__x_formattedTitle) ||
-                safeStr(chat.contact?.name) ||
-                safeStr(chat.contact?.pushname) ||
-                safeStr(chat.contact?.verifiedName) ||
-                number;
-
-              const timestamp = chat.t || chat.timestamp || chat.__x_t || 0;
-              const unreadCount = chat.unreadCount || chat.__x_unreadCount || 0;
-
-              result.recent.push({
-                id: serialized,
-                number: number,
-                name: name || number,
-                timestamp: Number(timestamp) || 0,
-                unreadCount: Number(unreadCount) || 0,
-              });
-            } catch {
-              // skip single malformed chat
-            }
-          }
-        }
-      } catch (chatErr) {
-        console.warn('Error reading Chat collection:', chatErr);
-      }
-
-      // 2. Extract Contacts (Saved Contacts only)
-      try {
-        const ContactCollection = collections.Contact;
-        if (ContactCollection && typeof ContactCollection.getModelsArray === 'function') {
-          const contacts = ContactCollection.getModelsArray();
-          const seen = new Set();
-
-          let getIsMyContactFn = null;
-          try {
-            const getters = window.require('WAWebFrontendContactGetters');
-            if (getters && typeof getters.getIsMyContact === 'function') {
-              getIsMyContactFn = getters.getIsMyContact;
-            }
-          } catch {}
-
-          let contactGetters = null;
-          try {
-            contactGetters = window.require('WAWebContactGetters');
-          } catch {}
-
-          for (const c of contacts) {
-            try {
-              if (!c || !c.id) continue;
-              const serialized = safeStr(c.id._serialized);
-
-              const isUser = serialized.endsWith('@c.us');
-              if (!isUser && !c.phoneNumber) continue;
-
-              const number =
-                safeStr(c.number) ||
-                safeStr(c.id.user) ||
-                safeStr(c.phoneNumber?._serialized ? c.phoneNumber.user : '');
-
-              if (!number) continue;
-
-              // Determine if this is an address book / saved contact
-              let isSaved = false;
-              if (getIsMyContactFn) {
-                try { isSaved = Boolean(getIsMyContactFn(c)); } catch {}
-              }
-              if (!isSaved) {
-                isSaved = Boolean(c.isMyContact || c.__x_isMyContact || c.isAddressBookContact);
-              }
-
-              // STRICT FILTER: If not a saved contact in your phonebook, skip it!
-              if (!isSaved) continue;
-
-              const effectiveId = isUser ? serialized : `${number}@c.us`;
-              if (seen.has(effectiveId)) continue;
-              seen.add(effectiveId);
-
-              let savedName = '';
-              if (contactGetters && typeof contactGetters.getName === 'function') {
-                try { savedName = safeStr(contactGetters.getName(c)); } catch {}
-              }
-              if (!savedName) {
-                savedName = safeStr(c.name) || safeStr(c.__x_name);
-              }
-
-              const pushname = safeStr(c.pushname) || safeStr(c.__x_pushname);
-              const displayName = savedName || pushname || number;
-
-              result.contacts.push({
-                id: effectiveId,
-                number: number,
-                name: displayName,
-                isMyContact: true,
-              });
-            } catch {
-              // skip single malformed contact
-            }
-          }
-        }
-      } catch (contactErr) {
-        console.warn('Error reading Contact collection:', contactErr);
-      }
-
-      return result;
+    recent.push({
+      id: jid,
+      number: num,
+      name: displayName,
+      timestamp: ch.timestamp || 0,
+      unreadCount: ch.unreadCount || 0,
     });
-
-    const recent = data.recent || [];
-    const contactList = data.contacts || [];
-
-    // Sort recent chats by latest message timestamp descending
-    recent.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-    // Map recent status
-    const recentIds = new Set(recent.map((r) => r.id));
-    for (const c of contactList) {
-      c.isRecent = recentIds.has(c.id);
-    }
-
-    // Sort all contacts alphabetically by name
-    contactList.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-
-    console.log(`[${session.id}] ✅ Loaded ${recent.length} recent chats and ${contactList.length} contacts.`);
-    session.cachedContacts = { recent, contacts: contactList };
-    if (global.gc) {
-      try { global.gc(); } catch (_) {}
-    }
-    return session.cachedContacts;
-  } catch (err) {
-    console.error(`[${session.id}] Failed to retrieve contacts:`, err);
-    return { recent: [], contacts: [] };
   }
+  recent.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  // 2. Process contacts
+  for (const [jid, c] of session.contactsMap.entries()) {
+    if (!jid.endsWith('@s.whatsapp.net')) continue;
+    const num = jid.split('@')[0];
+    if (seenNumbers.has(num)) continue;
+    seenNumbers.add(num);
+
+    const displayName = c.name || c.notify || c.verifiedName || num;
+    contacts.push({
+      id: jid,
+      number: num,
+      name: displayName,
+      isMyContact: Boolean(c.isSaved || c.name),
+    });
+  }
+
+  // 3. Fallback: Include recent chat participants in contacts if missing
+  for (const r of recent) {
+    if (!seenNumbers.has(r.number)) {
+      seenNumbers.add(r.number);
+      contacts.push({
+        id: r.id,
+        number: r.number,
+        name: r.name,
+        isMyContact: false,
+      });
+    }
+  }
+
+  const recentJids = new Set(recent.map((r) => r.id));
+  for (const c of contacts) {
+    c.isRecent = recentJids.has(c.id);
+  }
+
+  contacts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+  return { recent, contacts };
 }
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
@@ -407,7 +377,7 @@ app.get('/api/sessions', (_req, res) => {
 });
 
 // Create a new account session
-app.post('/api/sessions', (req, res) => {
+app.post('/api/sessions', async (req, res) => {
   const { name } = req.body || {};
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Account name is required.' });
@@ -421,7 +391,7 @@ app.post('/api/sessions', (req, res) => {
   manifest.push({ id, name: cleanName });
   saveSessionsManifest(manifest);
 
-  const session = createSession(id, cleanName);
+  const session = await createSession(id, cleanName);
 
   res.json({
     success: true,
@@ -452,12 +422,12 @@ app.delete('/api/sessions/:id', async (req, res) => {
   const session = sessions.get(id);
   if (session) {
     try {
-      if (session.client) {
-        await session.client.logout().catch(() => {});
-        await session.client.destroy().catch(() => {});
+      if (session.sock) {
+        await session.sock.logout().catch(() => {});
+        session.sock.end(undefined);
       }
     } catch (destroyErr) {
-      console.warn(`[${id}] Error during client cleanup:`, destroyErr.message);
+      console.warn(`[${id}] Error during cleanup:`, destroyErr.message);
     }
     sessions.delete(id);
   }
@@ -478,13 +448,41 @@ app.delete('/api/sessions/:id', async (req, res) => {
   res.json({ success: true, message: `Account "${id}" removed.` });
 });
 
+// WhatsApp Engine Power Management (Sleep / Wake On-Demand)
+app.get('/api/engine/status', (_req, res) => {
+  res.json({ running: engineRunning, activeSessions: sessions.size });
+});
+
+app.post('/api/engine/start', async (req, res) => {
+  const { sessionId = 'default' } = req.body || {};
+  try {
+    const session = await startEngine(sessionId);
+    res.json({ success: true, running: true, sessionId: session.id });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start engine: ' + err.message });
+  }
+});
+
+app.post('/api/engine/stop', async (_req, res) => {
+  try {
+    await stopEngine();
+    res.json({ success: true, running: false, message: 'WhatsApp engine sleeping.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to stop engine: ' + err.message });
+  }
+});
+
 // Connection status for a session
 app.get('/api/status', (req, res) => {
+  if (!engineRunning || sessions.size === 0) {
+    return res.json({ ready: false, engineRunning: false, sending: false });
+  }
+
   const sessionId = req.query.sessionId || 'default';
   const session = sessions.get(sessionId);
 
   if (!session) {
-    return res.status(404).json({ error: 'Session not found', ready: false });
+    return res.json({ error: 'Session not found', ready: false, engineRunning: true });
   }
 
   res.json({
@@ -493,6 +491,7 @@ app.get('/api/status', (req, res) => {
     qr: session.qrCodeDataUrl,
     sessionId: session.id,
     name: session.name,
+    engineRunning: true,
   });
 });
 
@@ -508,7 +507,7 @@ app.post('/api/pairing-code', async (req, res) => {
     return res.status(404).json({ error: 'Account session not found.' });
   }
 
-  const clean = String(phone).replace(/\D/g, '');
+  const clean = cleanNumber(phone);
   if (clean.length < 8) {
     return res.status(400).json({ error: 'Please enter a valid phone number with country code (e.g. 919876543210).' });
   }
@@ -518,15 +517,15 @@ app.post('/api/pairing-code', async (req, res) => {
   }
 
   try {
-    console.log(`[${sessionId}] 📱 Requesting pairing code for: ${clean}`);
-    const code = await session.client.requestPairingCode(clean);
+    console.log(`[${sessionId}] 📱 Requesting Baileys pairing code for: ${clean}`);
+    const code = await session.sock.requestPairingCode(clean);
     console.log(`[${sessionId}] 🔑 Pairing code generated: ${code}`);
     session.pairingCode = code;
     io.to(sessionId).emit('pairing_code', code);
     res.json({ success: true, code });
   } catch (err) {
     console.error(`[${sessionId}] Pairing code request failed:`, err);
-    res.status(500).json({ error: err.message || 'Failed to request pairing code. Make sure QR code is visible.' });
+    res.status(500).json({ error: err.message || 'Failed to request pairing code.' });
   }
 });
 
@@ -542,21 +541,26 @@ app.post('/api/logout', async (req, res) => {
   try {
     console.log(`[${sessionId}] 🚪 Logging out WhatsApp session...`);
     session.ready = false;
-    session.cachedContacts = null;
     session.qrCodeDataUrl = null;
     session.pairingCode = null;
     io.to(sessionId).emit('loading');
 
     try {
-      await session.client.logout();
+      await session.sock.logout();
     } catch (logoutErr) {
-      console.warn(`[${sessionId}] Logout warning:`, logoutErr.message);
+      console.warn(`[${sessionId}] Logout note:`, logoutErr.message);
     }
 
-    console.log(`[${sessionId}] 🔄 Re-initializing WhatsApp client...`);
-    session.client.initialize().catch((initErr) => {
-      console.warn(`[${sessionId}] Re-initialization note:`, initErr.message);
-    });
+    // Clean auth directory for this session so a new QR is generated
+    const sessDir = path.join(authDataPath, `session-${sessionId}`);
+    if (fs.existsSync(sessDir)) {
+      try {
+        fs.rmSync(sessDir, { recursive: true, force: true });
+      } catch (_) {}
+    }
+
+    sessions.delete(sessionId);
+    await createSession(session.id, session.name);
 
     res.json({ success: true, message: 'Logged out successfully.' });
   } catch (err) {
@@ -566,7 +570,7 @@ app.post('/api/logout', async (req, res) => {
 });
 
 // Fetch contacts and recent chats for a session
-app.get('/api/contacts', async (req, res) => {
+app.get('/api/contacts', (req, res) => {
   const sessionId = req.query.sessionId || 'default';
   const session = sessions.get(sessionId);
 
@@ -578,17 +582,8 @@ app.get('/api/contacts', async (req, res) => {
     return res.status(400).json({ error: 'WhatsApp is not connected for this account. Please scan the QR code first.' });
   }
 
-  const forceRefresh = req.query.refresh === 'true';
-  if (session.cachedContacts && !forceRefresh) {
-    return res.json(session.cachedContacts);
-  }
-
-  try {
-    const data = await fetchContactsData(session);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch contacts: ' + err.message });
-  }
+  const data = getContactsData(session);
+  res.json(data);
 });
 
 // Parse uploaded contacts file (CSV or TXT)
@@ -647,7 +642,7 @@ app.post('/api/send', upload.any(), async (req, res) => {
     } else if (legacyNumbersJson) {
       const rawNumbers = JSON.parse(legacyNumbersJson);
       recipients = rawNumbers.map((num) => ({
-        id: `${cleanNumber(num)}@c.us`,
+        id: toJid(num),
         name: cleanNumber(num),
         number: cleanNumber(num),
       }));
@@ -666,7 +661,6 @@ app.post('/api/send', upload.any(), async (req, res) => {
   const uploadedFiles = req.files || [];
   session.isSending = true;
 
-  // Respond immediately — progress updates sent via WebSocket to room
   res.json({ status: 'started', total: recipients.length });
 
   // ── Background send loop ──────────────────────────────────────────────
@@ -675,46 +669,64 @@ app.post('/api/send', upload.any(), async (req, res) => {
 
   for (let i = 0; i < recipients.length; i++) {
     const item = recipients[i];
-    let chatId = '';
+    let jid = '';
     let displayName = '';
     let displayNum = '';
 
     if (typeof item === 'object') {
       displayName = item.name || item.number || 'Contact';
-      displayNum = item.number || cleanNumber(item.id);
-      chatId = item.id && item.id.includes('@c.us')
-        ? item.id
-        : `${cleanNumber(displayNum)}@c.us`;
+      displayNum = cleanNumber(item.number || item.id);
+      jid = toJid(displayNum);
     } else {
-      const rawNum = cleanNumber(String(item));
-      displayName = rawNum;
-      displayNum = rawNum;
-      chatId = `${rawNum}@c.us`;
+      displayNum = cleanNumber(String(item));
+      displayName = displayNum;
+      jid = toJid(displayNum);
     }
 
     try {
       if (uploadedFiles.length > 0) {
         for (let j = 0; j < uploadedFiles.length; j++) {
           const file = uploadedFiles[j];
-          const media = MessageMedia.fromFilePath(file.path);
-          media.filename = file.originalname;
-
+          const fileBuffer = fs.readFileSync(file.path);
           const isImage = file.mimetype && file.mimetype.startsWith('image/');
-          const opts = {
-            sendMediaAsDocument: !isImage,
-          };
-          if (j === 0 && message) {
-            opts.caption = message;
+          const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+          const isAudio = file.mimetype && file.mimetype.startsWith('audio/');
+
+          const caption = (j === 0 && message) ? message : undefined;
+
+          if (isImage) {
+            await session.sock.sendMessage(jid, {
+              image: fileBuffer,
+              caption,
+              mimetype: file.mimetype,
+            });
+          } else if (isVideo) {
+            await session.sock.sendMessage(jid, {
+              video: fileBuffer,
+              caption,
+              mimetype: file.mimetype,
+            });
+          } else if (isAudio) {
+            await session.sock.sendMessage(jid, {
+              audio: fileBuffer,
+              mimetype: file.mimetype,
+            });
+          } else {
+            await session.sock.sendMessage(jid, {
+              document: fileBuffer,
+              fileName: file.originalname,
+              mimetype: file.mimetype,
+              caption,
+            });
           }
-          await session.client.sendMessage(chatId, media, opts);
         }
       } else if (message) {
-        await session.client.sendMessage(chatId, message);
+        await session.sock.sendMessage(jid, { text: message });
       }
 
       sentCount++;
       io.to(sessionId).emit('progress', {
-        id: chatId,
+        id: jid,
         name: displayName,
         number: displayNum,
         status: 'sent',
@@ -727,7 +739,7 @@ app.post('/api/send', upload.any(), async (req, res) => {
     } catch (err) {
       failedCount++;
       io.to(sessionId).emit('progress', {
-        id: chatId,
+        id: jid,
         name: displayName,
         number: displayNum,
         status: 'failed',
@@ -740,7 +752,7 @@ app.post('/api/send', upload.any(), async (req, res) => {
       console.error(`[${sessionId}] ❌ [${i + 1}/${recipients.length}] Failed for ${displayName} (${displayNum}): ${err.message}`);
     }
 
-    // Delay between sends (1–2s maximum for safe & fast delivery)
+    // Safe delivery delay (1–2 seconds)
     if (i < recipients.length - 1) {
       await randomDelay(1000, 2000);
     }
@@ -801,7 +813,7 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 Multi-Session WhatsApp Server running at http://localhost:${PORT}`);
-  console.log(`📱 Phone app connect URL: http://192.168.0.112:${PORT}`);
+  console.log(`\n🚀 Baileys Multi-Session WhatsApp Server running at http://localhost:${PORT}`);
+  console.log(`⚡ Ultralight engine (No Chrome, ~40MB RAM usage)`);
   console.log(`👥 Active accounts: ${Array.from(sessions.keys()).join(', ')}\n`);
 });
