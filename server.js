@@ -85,7 +85,6 @@ function saveSessionsManifest(list) {
 // ─── WhatsApp Baileys Multi-Session Manager ─────────────────────────────────
 
 const sessions = new Map();
-let engineRunning = true;
 
 async function createSession(id, name) {
   if (sessions.has(id)) {
@@ -147,7 +146,7 @@ async function createSession(id, name) {
       console.log(`[${id}] 🔌 Disconnected (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
       io.to(id).emit('disconnected', statusCode);
 
-      if (shouldReconnect && engineRunning) {
+      if (shouldReconnect) {
         sessions.delete(id);
         createSession(id, name).catch((err) => console.error(`[${id}] Reconnect error:`, err));
       }
@@ -239,36 +238,6 @@ async function createSession(id, name) {
     }
   });
 
-  return session;
-}
-
-// WhatsApp Engine On-Demand Controls (Sleep / Wake)
-async function stopEngine() {
-  engineRunning = false;
-  console.log('🛑 Putting WhatsApp engine to sleep (freeing memory to ~20MB)...');
-  for (const [id, session] of sessions.entries()) {
-    try {
-      if (session.sock) {
-        session.sock.end(undefined);
-      }
-    } catch (_) {}
-    session.ready = false;
-    session.qrCodeDataUrl = null;
-  }
-  sessions.clear();
-  if (global.gc) {
-    try { global.gc(); } catch (_) {}
-  }
-  io.emit('engine_state', { running: false });
-}
-
-async function startEngine(sessionId = 'default') {
-  engineRunning = true;
-  console.log(`⚡ Starting WhatsApp engine on demand for: "${sessionId}"...`);
-  const manifest = loadSessionsManifest();
-  const target = manifest.find((m) => m.id === sessionId) || manifest[0] || { id: 'default', name: 'Primary Account' };
-  const session = await createSession(target.id, target.name);
-  io.emit('engine_state', { running: true });
   return session;
 }
 
@@ -448,41 +417,13 @@ app.delete('/api/sessions/:id', async (req, res) => {
   res.json({ success: true, message: `Account "${id}" removed.` });
 });
 
-// WhatsApp Engine Power Management (Sleep / Wake On-Demand)
-app.get('/api/engine/status', (_req, res) => {
-  res.json({ running: engineRunning, activeSessions: sessions.size });
-});
-
-app.post('/api/engine/start', async (req, res) => {
-  const { sessionId = 'default' } = req.body || {};
-  try {
-    const session = await startEngine(sessionId);
-    res.json({ success: true, running: true, sessionId: session.id });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to start engine: ' + err.message });
-  }
-});
-
-app.post('/api/engine/stop', async (_req, res) => {
-  try {
-    await stopEngine();
-    res.json({ success: true, running: false, message: 'WhatsApp engine sleeping.' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to stop engine: ' + err.message });
-  }
-});
-
 // Connection status for a session
 app.get('/api/status', (req, res) => {
-  if (!engineRunning || sessions.size === 0) {
-    return res.json({ ready: false, engineRunning: false, sending: false });
-  }
-
   const sessionId = req.query.sessionId || 'default';
   const session = sessions.get(sessionId);
 
   if (!session) {
-    return res.json({ error: 'Session not found', ready: false, engineRunning: true });
+    return res.json({ error: 'Session not found', ready: false });
   }
 
   res.json({
@@ -491,7 +432,6 @@ app.get('/api/status', (req, res) => {
     qr: session.qrCodeDataUrl,
     sessionId: session.id,
     name: session.name,
-    engineRunning: true,
   });
 });
 
