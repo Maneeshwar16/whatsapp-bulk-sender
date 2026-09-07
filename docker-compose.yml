@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  whatsapp-sender:
+    build: .
+    container_name: whatsapp-sender
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - DATA_PATH=/app/.wwebjs_auth
+    volumes:
+      # Persist WhatsApp session credentials across container restarts
+      - wa_auth_data:/app/.wwebjs_auth
+      - wa_sessions_manifest:/app/sessions.json
+
+volumes:
+  wa_auth_data:
+  wa_sessions_manifest:

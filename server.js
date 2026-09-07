@@ -17,13 +17,13 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'DELETE'],
   },
 });
 
 app.use((_req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
   if (_req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -43,81 +43,162 @@ const storage = multer.diskStorage({
 });
 const upload = multer({
   storage,
-  limits: { fileSize: 64 * 1024 * 1024 }, // 64 MB per file (PDF, Docs, Images)
+  limits: { fileSize: 64 * 1024 * 1024 }, // 64 MB per file
 });
 
-// ─── WhatsApp Client ────────────────────────────────────────────────────────
-
-let clientReady = false;
-let qrCodeDataUrl = null;
-let isSending = false;
-let cachedContacts = null;
+// ─── Sessions Manifest & Auth Storage ───────────────────────────────────────
 
 const authDataPath = process.env.DATA_PATH || './.wwebjs_auth/';
+if (!fs.existsSync(authDataPath)) fs.mkdirSync(authDataPath, { recursive: true });
+
+// Auto-migrate legacy single-session folder if present
+const legacySessionDir = path.join(authDataPath, 'session');
+const defaultSessionDir = path.join(authDataPath, 'session-default');
+if (fs.existsSync(legacySessionDir) && !fs.existsSync(defaultSessionDir)) {
+  try {
+    fs.renameSync(legacySessionDir, defaultSessionDir);
+    console.log('📦 Migrated legacy single-session directory to session-default.');
+  } catch (e) {
+    console.warn('Migration note:', e.message);
+  }
+}
+
+const SESSIONS_MANIFEST_FILE = path.join(__dirname, 'sessions.json');
+
+function loadSessionsManifest() {
+  try {
+    if (fs.existsSync(SESSIONS_MANIFEST_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_MANIFEST_FILE, 'utf-8'));
+      if (Array.isArray(data) && data.length > 0) return data;
+    }
+  } catch (e) {
+    console.error('Failed reading sessions manifest:', e);
+  }
+  return [{ id: 'default', name: 'Primary Account' }];
+}
+
+function saveSessionsManifest(list) {
+  try {
+    fs.writeFileSync(SESSIONS_MANIFEST_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('Failed saving sessions manifest:', e);
+  }
+}
+
+// ─── WhatsApp Multi-Session Manager ─────────────────────────────────────────
+
 const puppeteerExecutablePath =
   process.env.PUPPETEER_EXECUTABLE_PATH ||
   (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 
-const waClient = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: authDataPath,
-  }),
-  puppeteer: {
-    headless: true,
-    executablePath: puppeteerExecutablePath,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-default-apps',
-      '--mute-audio',
-    ],
-  },
-});
+// sessions: Map<sessionId, SessionData>
+const sessions = new Map();
 
-waClient.on('qr', async (qr) => {
-  console.log('QR code received — scan it with your phone.');
-  qrCodeDataUrl = await qrcode.toDataURL(qr);
-  io.emit('qr', qrCodeDataUrl);
-});
+function createSession(id, name) {
+  if (sessions.has(id)) {
+    return sessions.get(id);
+  }
 
-waClient.on('code_received', (code) => {
-  console.log('🔑 WhatsApp pairing code received:', code);
-  io.emit('pairing_code', code);
-});
+  console.log(`🚀 [${id}] Initializing WhatsApp session ("${name}")...`);
 
-waClient.on('ready', async () => {
-  clientReady = true;
-  qrCodeDataUrl = null;
-  console.log('✅ WhatsApp client is ready!');
-  io.emit('ready');
-});
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: id,
+      dataPath: authDataPath,
+    }),
+    puppeteer: {
+      headless: true,
+      executablePath: puppeteerExecutablePath,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--mute-audio',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+        '--disable-ipc-flooding-protection',
+        '--disable-renderer-backgrounding',
+        '--force-color-profile=srgb',
+        '--metrics-recording-only',
+        '--js-flags=--max-old-space-size=256',
+      ],
+    },
+  });
 
-waClient.on('authenticated', () => {
-  console.log('🔐 Authenticated successfully.');
-});
+  const session = {
+    id,
+    name: name || id,
+    client,
+    ready: false,
+    qrCodeDataUrl: null,
+    pairingCode: null,
+    isSending: false,
+    cachedContacts: null,
+    createdAt: Date.now(),
+  };
 
-waClient.on('auth_failure', (msg) => {
-  console.error('❌ Authentication failure:', msg);
-  io.emit('auth_failure', msg);
-});
+  sessions.set(id, session);
 
-waClient.on('disconnected', (reason) => {
-  clientReady = false;
-  cachedContacts = null;
-  console.log('🔌 Disconnected:', reason);
-  io.emit('disconnected', reason);
-  waClient.initialize().catch(() => {});
-});
+  client.on('qr', async (qr) => {
+    console.log(`[${id}] QR code received — scan it with your phone.`);
+    session.qrCodeDataUrl = await qrcode.toDataURL(qr);
+    io.to(id).emit('qr', session.qrCodeDataUrl);
+  });
 
-console.log('Initializing WhatsApp client — please wait for the QR code...');
-waClient.initialize();
+  client.on('code_received', (code) => {
+    console.log(`[${id}] 🔑 Pairing code received:`, code);
+    session.pairingCode = code;
+    io.to(id).emit('pairing_code', code);
+  });
+
+  client.on('ready', async () => {
+    session.ready = true;
+    session.qrCodeDataUrl = null;
+    session.pairingCode = null;
+    console.log(`[${id}] ✅ WhatsApp client is ready!`);
+    io.to(id).emit('ready');
+  });
+
+  client.on('authenticated', () => {
+    console.log(`[${id}] 🔐 Authenticated successfully.`);
+  });
+
+  client.on('auth_failure', (msg) => {
+    console.error(`[${id}] ❌ Authentication failure:`, msg);
+    io.to(id).emit('auth_failure', msg);
+  });
+
+  client.on('disconnected', (reason) => {
+    session.ready = false;
+    session.cachedContacts = null;
+    console.log(`[${id}] 🔌 Disconnected:`, reason);
+    io.to(id).emit('disconnected', reason);
+    client.initialize().catch(() => {});
+  });
+
+  client.initialize().catch((err) => {
+    console.error(`[${id}] Initialization error:`, err);
+  });
+
+  return session;
+}
+
+// Startup: initialize all known sessions from manifest
+const initialManifest = loadSessionsManifest();
+for (const item of initialManifest) {
+  createSession(item.id, item.name);
+}
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
@@ -131,15 +212,16 @@ function randomDelay(minMs = 1000, maxMs = 2000) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchContactsData() {
-  if (!clientReady || !waClient.pupPage) return { recent: [], contacts: [] };
+async function fetchContactsData(session) {
+  if (!session || !session.ready || !session.client?.pupPage) {
+    return { recent: [], contacts: [] };
+  }
 
   try {
-    const data = await waClient.pupPage.evaluate(async () => {
+    const data = await session.client.pupPage.evaluate(async () => {
       const result = { recent: [], contacts: [] };
       const safeStr = (v) => (typeof v === 'string' ? v.trim() : '');
 
-      // Wait a moment if collections are still initializing
       const getCollections = () => {
         try {
           return window.require('WAWebCollections');
@@ -206,7 +288,6 @@ async function fetchContactsData() {
           const contacts = ContactCollection.getModelsArray();
           const seen = new Set();
 
-          // Obtain official WhatsApp Web getter for address book contacts
           let getIsMyContactFn = null;
           try {
             const getters = window.require('WAWebFrontendContactGetters');
@@ -245,14 +326,12 @@ async function fetchContactsData() {
               }
 
               // STRICT FILTER: If not a saved contact in your phonebook, skip it!
-              // This filters out hundreds of random participants from group chats.
               if (!isSaved) continue;
 
               const effectiveId = isUser ? serialized : `${number}@c.us`;
               if (seen.has(effectiveId)) continue;
               seen.add(effectiveId);
 
-              // Get saved contact name (preferred) or pushname
               let savedName = '';
               if (contactGetters && typeof contactGetters.getName === 'function') {
                 try { savedName = safeStr(contactGetters.getName(c)); } catch {}
@@ -297,27 +376,136 @@ async function fetchContactsData() {
     // Sort all contacts alphabetically by name
     contactList.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-    console.log(`✅ Loaded ${recent.length} recent chats and ${contactList.length} contacts.`);
-    cachedContacts = { recent, contacts: contactList };
-    return cachedContacts;
+    console.log(`[${session.id}] ✅ Loaded ${recent.length} recent chats and ${contactList.length} contacts.`);
+    session.cachedContacts = { recent, contacts: contactList };
+    if (global.gc) {
+      try { global.gc(); } catch (_) {}
+    }
+    return session.cachedContacts;
   } catch (err) {
-    console.error('Failed to retrieve contacts/chats safely:', err);
+    console.error(`[${session.id}] Failed to retrieve contacts:`, err);
     return { recent: [], contacts: [] };
   }
 }
 
-// ─── Routes ─────────────────────────────────────────────────────────────────
+// ─── API Routes ─────────────────────────────────────────────────────────────
 
-// Connection status
-app.get('/api/status', (_req, res) => {
-  res.json({ ready: clientReady, sending: isSending });
+// List all registered accounts/sessions
+app.get('/api/sessions', (_req, res) => {
+  const manifest = loadSessionsManifest();
+  const list = manifest.map((item) => {
+    const sess = sessions.get(item.id);
+    return {
+      id: item.id,
+      name: item.name,
+      ready: Boolean(sess?.ready),
+      sending: Boolean(sess?.isSending),
+      hasQr: Boolean(sess?.qrCodeDataUrl),
+    };
+  });
+  res.json({ sessions: list });
+});
+
+// Create a new account session
+app.post('/api/sessions', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Account name is required.' });
+  }
+
+  const cleanName = name.trim();
+  const slug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 16);
+  const id = `${slug || 'account'}-${Date.now().toString(36)}`;
+
+  const manifest = loadSessionsManifest();
+  manifest.push({ id, name: cleanName });
+  saveSessionsManifest(manifest);
+
+  const session = createSession(id, cleanName);
+
+  res.json({
+    success: true,
+    session: {
+      id: session.id,
+      name: session.name,
+      ready: session.ready,
+      sending: session.isSending,
+      hasQr: Boolean(session.qrCodeDataUrl),
+    },
+  });
+});
+
+// Delete an account session
+app.delete('/api/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  const manifest = loadSessionsManifest();
+
+  if (manifest.length <= 1) {
+    return res.status(400).json({ error: 'Cannot delete the only remaining account.' });
+  }
+
+  const sessionIndex = manifest.findIndex((m) => m.id === id);
+  if (sessionIndex === -1) {
+    return res.status(404).json({ error: 'Account not found.' });
+  }
+
+  const session = sessions.get(id);
+  if (session) {
+    try {
+      if (session.client) {
+        await session.client.logout().catch(() => {});
+        await session.client.destroy().catch(() => {});
+      }
+    } catch (destroyErr) {
+      console.warn(`[${id}] Error during client cleanup:`, destroyErr.message);
+    }
+    sessions.delete(id);
+  }
+
+  // Remove local auth folder
+  const sessDir = path.join(authDataPath, `session-${id}`);
+  if (fs.existsSync(sessDir)) {
+    try {
+      fs.rmSync(sessDir, { recursive: true, force: true });
+    } catch (rmErr) {
+      console.warn(`[${id}] Error removing auth directory:`, rmErr.message);
+    }
+  }
+
+  manifest.splice(sessionIndex, 1);
+  saveSessionsManifest(manifest);
+
+  res.json({ success: true, message: `Account "${id}" removed.` });
+});
+
+// Connection status for a session
+app.get('/api/status', (req, res) => {
+  const sessionId = req.query.sessionId || 'default';
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found', ready: false });
+  }
+
+  res.json({
+    ready: session.ready,
+    sending: session.isSending,
+    qr: session.qrCodeDataUrl,
+    sessionId: session.id,
+    name: session.name,
+  });
 });
 
 // Request WhatsApp pairing code (link with phone number)
 app.post('/api/pairing-code', async (req, res) => {
-  const { phone } = req.body || {};
+  const { sessionId = 'default', phone } = req.body || {};
   if (!phone) {
     return res.status(400).json({ error: 'Phone number is required.' });
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Account session not found.' });
   }
 
   const clean = String(phone).replace(/\D/g, '');
@@ -325,62 +513,78 @@ app.post('/api/pairing-code', async (req, res) => {
     return res.status(400).json({ error: 'Please enter a valid phone number with country code (e.g. 919876543210).' });
   }
 
-  if (clientReady) {
-    return res.status(400).json({ error: 'WhatsApp is already connected!' });
+  if (session.ready) {
+    return res.status(400).json({ error: 'WhatsApp is already connected for this account!' });
   }
 
   try {
-    console.log(`📱 Requesting pairing code for: ${clean}`);
-    const code = await waClient.requestPairingCode(clean);
-    console.log(`🔑 Pairing code generated: ${code}`);
-    io.emit('pairing_code', code);
+    console.log(`[${sessionId}] 📱 Requesting pairing code for: ${clean}`);
+    const code = await session.client.requestPairingCode(clean);
+    console.log(`[${sessionId}] 🔑 Pairing code generated: ${code}`);
+    session.pairingCode = code;
+    io.to(sessionId).emit('pairing_code', code);
     res.json({ success: true, code });
   } catch (err) {
-    console.error('Pairing code request failed:', err);
+    console.error(`[${sessionId}] Pairing code request failed:`, err);
     res.status(500).json({ error: err.message || 'Failed to request pairing code. Make sure QR code is visible.' });
   }
 });
 
 // Logout / unlink WhatsApp session
-app.post('/api/logout', async (_req, res) => {
+app.post('/api/logout', async (req, res) => {
+  const { sessionId = 'default' } = req.body || {};
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Account session not found.' });
+  }
+
   try {
-    console.log('🚪 Logging out of WhatsApp session...');
-    clientReady = false;
-    cachedContacts = null;
-    qrCodeDataUrl = null;
-    io.emit('loading');
+    console.log(`[${sessionId}] 🚪 Logging out WhatsApp session...`);
+    session.ready = false;
+    session.cachedContacts = null;
+    session.qrCodeDataUrl = null;
+    session.pairingCode = null;
+    io.to(sessionId).emit('loading');
 
     try {
-      await waClient.logout();
+      await session.client.logout();
     } catch (logoutErr) {
-      console.warn('Logout warning (session may already be closed):', logoutErr.message);
+      console.warn(`[${sessionId}] Logout warning:`, logoutErr.message);
     }
 
-    console.log('🔄 Re-initializing WhatsApp client...');
-    waClient.initialize().catch((initErr) => {
-      console.warn('Re-initialization note:', initErr.message);
+    console.log(`[${sessionId}] 🔄 Re-initializing WhatsApp client...`);
+    session.client.initialize().catch((initErr) => {
+      console.warn(`[${sessionId}] Re-initialization note:`, initErr.message);
     });
 
     res.json({ success: true, message: 'Logged out successfully.' });
   } catch (err) {
-    console.error('Logout failed:', err);
+    console.error(`[${sessionId}] Logout failed:`, err);
     res.status(500).json({ error: 'Logout failed: ' + err.message });
   }
 });
 
-// Fetch contacts and recent chats
+// Fetch contacts and recent chats for a session
 app.get('/api/contacts', async (req, res) => {
-  if (!clientReady) {
-    return res.status(400).json({ error: 'WhatsApp is not connected. Please scan the QR code first.' });
+  const sessionId = req.query.sessionId || 'default';
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found.' });
+  }
+
+  if (!session.ready) {
+    return res.status(400).json({ error: 'WhatsApp is not connected for this account. Please scan the QR code first.' });
   }
 
   const forceRefresh = req.query.refresh === 'true';
-  if (cachedContacts && !forceRefresh) {
-    return res.json(cachedContacts);
+  if (session.cachedContacts && !forceRefresh) {
+    return res.json(session.cachedContacts);
   }
 
   try {
-    const data = await fetchContactsData();
+    const data = await fetchContactsData(session);
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch contacts: ' + err.message });
@@ -420,16 +624,21 @@ app.post('/api/upload-contacts', upload.single('file'), (req, res) => {
   }
 });
 
-// Send messages
+// Send messages for a specific session
 app.post('/api/send', upload.any(), async (req, res) => {
-  if (!clientReady) {
-    return res.status(400).json({ error: 'WhatsApp is not connected. Please scan the QR code first.' });
+  const { sessionId = 'default', message, recipients: recipientsJson, numbers: legacyNumbersJson } = req.body;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found.' });
   }
-  if (isSending) {
-    return res.status(409).json({ error: 'A send operation is already in progress. Please wait.' });
+  if (!session.ready) {
+    return res.status(400).json({ error: 'WhatsApp is not connected for this account. Please scan the QR code first.' });
+  }
+  if (session.isSending) {
+    return res.status(409).json({ error: 'A send operation is already in progress for this account. Please wait.' });
   }
 
-  const { message, recipients: recipientsJson, numbers: legacyNumbersJson } = req.body;
   let recipients = [];
 
   try {
@@ -455,9 +664,9 @@ app.post('/api/send', upload.any(), async (req, res) => {
   }
 
   const uploadedFiles = req.files || [];
-  isSending = true;
+  session.isSending = true;
 
-  // Respond immediately — progress updates sent via WebSocket
+  // Respond immediately — progress updates sent via WebSocket to room
   res.json({ status: 'started', total: recipients.length });
 
   // ── Background send loop ──────────────────────────────────────────────
@@ -497,14 +706,14 @@ app.post('/api/send', upload.any(), async (req, res) => {
           if (j === 0 && message) {
             opts.caption = message;
           }
-          await waClient.sendMessage(chatId, media, opts);
+          await session.client.sendMessage(chatId, media, opts);
         }
       } else if (message) {
-        await waClient.sendMessage(chatId, message);
+        await session.client.sendMessage(chatId, message);
       }
 
       sentCount++;
-      io.emit('progress', {
+      io.to(sessionId).emit('progress', {
         id: chatId,
         name: displayName,
         number: displayNum,
@@ -514,10 +723,10 @@ app.post('/api/send', upload.any(), async (req, res) => {
         sentCount,
         failedCount,
       });
-      console.log(`✅ [${i + 1}/${recipients.length}] Sent to ${displayName} (${displayNum})`);
+      console.log(`[${sessionId}] ✅ [${i + 1}/${recipients.length}] Sent to ${displayName} (${displayNum})`);
     } catch (err) {
       failedCount++;
-      io.emit('progress', {
+      io.to(sessionId).emit('progress', {
         id: chatId,
         name: displayName,
         number: displayNum,
@@ -528,10 +737,10 @@ app.post('/api/send', upload.any(), async (req, res) => {
         sentCount,
         failedCount,
       });
-      console.error(`❌ [${i + 1}/${recipients.length}] Failed for ${displayName} (${displayNum}): ${err.message}`);
+      console.error(`[${sessionId}] ❌ [${i + 1}/${recipients.length}] Failed for ${displayName} (${displayNum}): ${err.message}`);
     }
 
-    // Delay between sends (skip after the last one)
+    // Delay between sends (1–2s maximum for safe & fast delivery)
     if (i < recipients.length - 1) {
       await randomDelay(1000, 2000);
     }
@@ -546,29 +755,53 @@ app.post('/api/send', upload.any(), async (req, res) => {
     }
   }
 
-  isSending = false;
-  io.emit('complete', { sentCount, failedCount, total: recipients.length });
-  console.log(`\n🏁 Done! Sent: ${sentCount}, Failed: ${failedCount}, Total: ${recipients.length}`);
+  session.isSending = false;
+  io.to(sessionId).emit('complete', { sentCount, failedCount, total: recipients.length });
+  console.log(`\n[${sessionId}] 🏁 Done! Sent: ${sentCount}, Failed: ${failedCount}, Total: ${recipients.length}`);
 });
 
 // ─── Socket.IO ──────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
-  console.log('🌐 Browser connected.');
+  console.log('🌐 Client connected:', socket.id);
 
-  if (clientReady) {
-    socket.emit('ready');
-  } else if (qrCodeDataUrl) {
-    socket.emit('qr', qrCodeDataUrl);
-  } else {
-    socket.emit('loading');
-  }
+  socket.on('join_session', (sessionId) => {
+    const sid = sessionId || 'default';
+    for (const room of socket.rooms) {
+      if (room !== socket.id) socket.leave(room);
+    }
+    socket.join(sid);
+    console.log(`👤 Socket ${socket.id} joined session room: "${sid}"`);
+
+    const session = sessions.get(sid);
+    if (!session) {
+      socket.emit('session_not_found', sid);
+      return;
+    }
+
+    if (session.ready) {
+      socket.emit('ready');
+    } else if (session.qrCodeDataUrl) {
+      socket.emit('qr', session.qrCodeDataUrl);
+    } else {
+      socket.emit('loading');
+    }
+
+    if (session.pairingCode) {
+      socket.emit('pairing_code', session.pairingCode);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    // disconnected
+  });
 });
 
 // ─── Start Server ───────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 Server running at http://localhost:${PORT}`);
-  console.log(`📱 Phone app connect URL: http://192.168.0.112:${PORT}\n`);
+  console.log(`\n🚀 Multi-Session WhatsApp Server running at http://localhost:${PORT}`);
+  console.log(`📱 Phone app connect URL: http://192.168.0.112:${PORT}`);
+  console.log(`👥 Active accounts: ${Array.from(sessions.keys()).join(', ')}\n`);
 });

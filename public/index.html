@@ -20,6 +20,14 @@
       <div class="server-config-bar">
         <span>🌐 Backend: <code id="server-url-display">http://192.168.0.112:3000</code></span>
         <button id="change-server-btn" class="btn-text">⚙️ Configure Server IP</button>
+        <span class="divider">|</span>
+        <a href="/WADirectSender.apk" class="btn-text" download style="text-decoration:none; font-weight:600; color:var(--primary-accent);">📲 Download App (.apk)</a>
+      </div>
+      <div class="account-picker-bar">
+        <label for="session-select" class="account-label">👤 <strong>Account:</strong></label>
+        <select id="session-select" class="account-select"></select>
+        <button id="add-account-btn" class="btn btn-outline btn-small" type="button" title="Add another WhatsApp account">➕ Add Account</button>
+        <button id="delete-account-btn" class="btn btn-outline btn-small btn-danger" type="button" title="Delete active account" style="display:none;">🗑️ Delete</button>
       </div>
     </header>
 
@@ -252,6 +260,28 @@
         <div id="complete-banner" class="complete-banner hidden"></div>
       </section>
     </div>
+
+    <!-- Add Account Modal -->
+    <div id="add-account-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>➕ Add WhatsApp Account</h3>
+          <button id="close-add-account-modal-btn" class="close-modal-btn" type="button">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">Create an isolated WhatsApp profile for another person or phone number (e.g., Maneeshwar, Alex, Sales):</p>
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label for="new-account-name-input" style="display:block; margin-bottom: 6px; font-weight: 600; font-size: 0.88rem;">Account / Person Name:</label>
+            <input type="text" id="new-account-name-input" placeholder="e.g. Alex or Maneeshwar" maxlength="30" autocomplete="off" style="width: 100%; padding: 8px 12px; border: 1.5px solid var(--input-border); background: var(--input-bg); color: var(--text-main); border-radius: 8px; font-size: 0.95rem;" />
+          </div>
+          <div id="add-account-error" class="error-text hidden" style="color: #ef4444; font-size: 0.85rem;"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancel-add-account-btn" class="btn btn-outline btn-small" type="button">Cancel</button>
+          <button id="confirm-add-account-btn" class="btn btn-primary btn-small" type="button">Create &amp; Switch</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Socket.IO client (bundled locally for mobile APK support) -->
@@ -292,6 +322,18 @@
       changeServerBtn.addEventListener('click', promptChangeServerIp);
     }
 
+    // ── Multi-Session State ────────────────────────────────────────────────
+    let currentSessionId = localStorage.getItem('WA_ACTIVE_SESSION') || 'default';
+    const sessionSelect        = document.getElementById('session-select');
+    const addAccountBtn        = document.getElementById('add-account-btn');
+    const deleteAccountBtn     = document.getElementById('delete-account-btn');
+    const addAccountModal      = document.getElementById('add-account-modal');
+    const closeAddAccountModal = document.getElementById('close-add-account-modal-btn');
+    const cancelAddAccountBtn  = document.getElementById('cancel-add-account-btn');
+    const confirmAddAccountBtn = document.getElementById('confirm-add-account-btn');
+    const newAccountNameInput  = document.getElementById('new-account-name-input');
+    const addAccountError      = document.getElementById('add-account-error');
+
     // ── Elements ───────────────────────────────────────────────────────────
     const loadingState      = document.getElementById('loading-state');
     const serverErrorState  = document.getElementById('server-error-state');
@@ -303,6 +345,221 @@
     const readyState        = document.getElementById('ready-state');
     const disconnectedState = document.getElementById('disconnected-state');
     const refreshContactsBtn= document.getElementById('refresh-contacts-btn');
+
+    // ── Socket.IO Real-time Connection ─────────────────────────────────────
+    let socket = null;
+    try {
+      if (typeof io === 'function') {
+        socket = io(backendUrl, {
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+          reconnectionDelay: 1000,
+        });
+
+        socket.on('connect', () => {
+          console.log('⚡ Socket connected:', socket.id, 'Joining room:', currentSessionId);
+          socket.emit('join_session', currentSessionId);
+        });
+
+        socket.on('qr', (dataUrl) => {
+          qrImage.src = dataUrl;
+          showStatus('qr');
+        });
+
+        socket.on('pairing_code', (code) => {
+          displayPairingCode(code);
+        });
+
+        socket.on('ready', () => {
+          isConnected = true;
+          showStatus('ready');
+          loadContacts();
+          updateSendButton();
+          loadSessionsList();
+        });
+
+        socket.on('loading', () => {
+          isConnected = false;
+          showStatus('loading');
+          updateSendButton();
+        });
+
+        socket.on('disconnected', () => {
+          isConnected = false;
+          showStatus('disconnected');
+          updateSendButton();
+        });
+
+        socket.on('progress', (data) => {
+          updateProgressRow(data);
+        });
+
+        socket.on('complete', (summary) => {
+          isSending = false;
+          updateSendButton();
+          completeBanner.innerHTML = `🏁 <strong>Broadcast complete!</strong> Sent: <b>${summary.sentCount}</b> | Failed: <b>${summary.failedCount}</b> | Total: <b>${summary.total}</b>`;
+          completeBanner.classList.remove('hidden');
+        });
+      }
+    } catch (e) {
+      console.warn('Socket.IO init note:', e);
+    }
+
+    // ── Session Switcher & Modal Management ────────────────────────────────
+    async function loadSessionsList() {
+      try {
+        const res = await fetch(`${backendUrl}/api/sessions`);
+        const data = await res.json();
+        if (data.sessions && Array.isArray(data.sessions)) {
+          sessionSelect.innerHTML = '';
+          data.sessions.forEach((s) => {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = `${s.name} ${s.ready ? '✅' : s.hasQr ? '📷' : '⏳'}`;
+            sessionSelect.appendChild(opt);
+          });
+
+          const exists = data.sessions.some((s) => s.id === currentSessionId);
+          if (!exists && data.sessions.length > 0) {
+            currentSessionId = data.sessions[0].id;
+            localStorage.setItem('WA_ACTIVE_SESSION', currentSessionId);
+          }
+          sessionSelect.value = currentSessionId;
+
+          if (deleteAccountBtn) {
+            deleteAccountBtn.style.display = data.sessions.length > 1 ? 'inline-block' : 'none';
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to load sessions list:', err);
+      }
+    }
+
+    if (sessionSelect) {
+      sessionSelect.addEventListener('change', (e) => {
+        const newId = e.target.value;
+        if (newId === currentSessionId) return;
+        currentSessionId = newId;
+        localStorage.setItem('WA_ACTIVE_SESSION', currentSessionId);
+
+        if (socket && socket.connected) {
+          socket.emit('join_session', currentSessionId);
+        }
+
+        // Reset view for newly switched account
+        isConnected = false;
+        selectedContactsMap.clear();
+        selectedChipsWrap.classList.add('hidden');
+        selectedChipsList.innerHTML = '';
+        chipsCount.textContent = '0';
+        searchQuery = '';
+        if (contactSearch) contactSearch.value = '';
+        if (pairingCodeDisplay) pairingCodeDisplay.classList.add('hidden');
+        if (pairingError) pairingError.classList.add('hidden');
+        showStatus('loading');
+        checkBackendConnection(true);
+      });
+    }
+
+    function closeModal() {
+      addAccountModal.classList.add('hidden');
+      addAccountError.classList.add('hidden');
+    }
+
+    if (addAccountBtn) {
+      addAccountBtn.addEventListener('click', () => {
+        newAccountNameInput.value = '';
+        addAccountError.classList.add('hidden');
+        addAccountModal.classList.remove('hidden');
+        newAccountNameInput.focus();
+      });
+    }
+
+    if (closeAddAccountModal) closeAddAccountModal.addEventListener('click', closeModal);
+    if (cancelAddAccountBtn) cancelAddAccountBtn.addEventListener('click', closeModal);
+
+    if (confirmAddAccountBtn) {
+      confirmAddAccountBtn.addEventListener('click', async () => {
+        const name = newAccountNameInput.value.trim();
+        if (!name) {
+          addAccountError.textContent = 'Please enter an account or person name.';
+          addAccountError.classList.remove('hidden');
+          return;
+        }
+
+        confirmAddAccountBtn.disabled = true;
+        confirmAddAccountBtn.textContent = 'Creating…';
+
+        try {
+          const res = await fetch(`${backendUrl}/api/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          const data = await res.json();
+          confirmAddAccountBtn.disabled = false;
+          confirmAddAccountBtn.textContent = 'Create & Switch';
+
+          if (data.error) {
+            addAccountError.textContent = data.error;
+            addAccountError.classList.remove('hidden');
+            return;
+          }
+
+          closeModal();
+          currentSessionId = data.session.id;
+          localStorage.setItem('WA_ACTIVE_SESSION', currentSessionId);
+
+          if (socket && socket.connected) {
+            socket.emit('join_session', currentSessionId);
+          }
+
+          await loadSessionsList();
+          showStatus('loading');
+          checkBackendConnection(true);
+        } catch (err) {
+          confirmAddAccountBtn.disabled = false;
+          confirmAddAccountBtn.textContent = 'Create & Switch';
+          addAccountError.textContent = 'Failed: ' + err.message;
+          addAccountError.classList.remove('hidden');
+        }
+      });
+    }
+
+    if (deleteAccountBtn) {
+      deleteAccountBtn.addEventListener('click', async () => {
+        const currentName = sessionSelect.options[sessionSelect.selectedIndex]?.text || currentSessionId;
+        if (!confirm(`Delete account profile "${currentName}"?\nThis will disconnect and clear this WhatsApp session.`)) {
+          return;
+        }
+
+        deleteAccountBtn.disabled = true;
+        try {
+          const res = await fetch(`${backendUrl}/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+            method: 'DELETE',
+          });
+          const data = await res.json();
+          deleteAccountBtn.disabled = false;
+
+          if (data.error) {
+            alert('Cannot delete: ' + data.error);
+            return;
+          }
+
+          currentSessionId = 'default';
+          localStorage.setItem('WA_ACTIVE_SESSION', 'default');
+          if (socket && socket.connected) {
+            socket.emit('join_session', 'default');
+          }
+          await loadSessionsList();
+          showStatus('loading');
+          checkBackendConnection(true);
+        } catch (err) {
+          deleteAccountBtn.disabled = false;
+          alert('Delete failed: ' + err.message);
+        }
+      });
+    }
 
     if (errServerUrl) errServerUrl.textContent = backendUrl;
     if (errChangeServerBtn) errChangeServerBtn.addEventListener('click', promptChangeServerIp);
@@ -370,7 +627,7 @@
           const res = await fetch(`${backendUrl}/api/pairing-code`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone }),
+            body: JSON.stringify({ sessionId: currentSessionId, phone }),
           });
           let data;
           const contentType = res.headers.get('content-type') || '';
@@ -405,16 +662,22 @@
 
     if (logoutBtn) {
       logoutBtn.addEventListener('click', async () => {
-        if (!confirm('Are you sure you want to log out of WhatsApp? You will need to link your device again.')) {
+        if (!confirm('Are you sure you want to log out of WhatsApp for this account? You will need to link again.')) {
           return;
         }
         logoutBtn.disabled = true;
         showStatus('loading');
         try {
-          const res = await fetch(`${backendUrl}/api/logout`, { method: 'POST' });
+          const res = await fetch(`${backendUrl}/api/logout`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: currentSessionId }),
+          });
           const data = await res.json();
+          logoutBtn.disabled = false;
           if (data.error) alert('Logout warning: ' + data.error);
         } catch (err) {
+          logoutBtn.disabled = false;
           console.warn('Logout request failed:', err);
         }
       });
@@ -424,7 +687,11 @@
       reconnectBtn.addEventListener('click', async () => {
         showStatus('loading');
         try {
-          await fetch(`${backendUrl}/api/logout`, { method: 'POST' });
+          await fetch(`${backendUrl}/api/logout`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: currentSessionId }),
+          });
         } catch (_) {}
       });
     }
@@ -538,64 +805,6 @@
       });
     });
 
-    // ── Socket.IO ──────────────────────────────────────────────────────────
-    const socket = io(backendUrl, {
-      transports: ['websocket', 'polling'],
-    });
-
-    socket.on('connect', () => {
-      hasConnectedToBackend = true;
-      if (initialCheckTimer) clearTimeout(initialCheckTimer);
-    });
-
-    socket.on('connect_error', (err) => {
-      console.warn('Socket connect error:', err);
-      if (!isConnected && !hasConnectedToBackend) {
-        showStatus('server-error');
-      }
-    });
-
-    socket.on('loading', () => showStatus('loading'));
-    socket.on('qr', (dataUrl) => {
-      qrImage.src = dataUrl;
-      showStatus('qr');
-    });
-    socket.on('pairing_code', (code) => {
-      displayPairingCode(code);
-    });
-    socket.on('ready', () => {
-      isConnected = true;
-      showStatus('ready');
-      loadContacts();
-      updateSendButton();
-    });
-    socket.on('disconnected', () => {
-      isConnected = false;
-      showStatus('disconnected');
-      updateSendButton();
-    });
-    socket.on('auth_failure', () => {
-      isConnected = false;
-      showStatus('disconnected');
-      updateSendButton();
-    });
-
-    socket.on('progress', (data) => {
-      updateProgressRow(data);
-    });
-
-    socket.on('complete', (data) => {
-      isSending = false;
-      sendBtn.disabled = false;
-      updateSendButton();
-
-      completeBanner.classList.remove('hidden');
-      completeBanner.innerHTML = `
-        <strong>✅ Broadcast Complete!</strong><br>
-        Sent: ${data.sentCount} &nbsp;|&nbsp; Failed: ${data.failedCount} &nbsp;|&nbsp; Total: ${data.total}
-      `;
-    });
-
     function showStatus(state) {
       loadingState.classList.add('hidden');
       qrState.classList.add('hidden');
@@ -615,7 +824,9 @@
       contactsEmpty.classList.add('hidden');
 
       try {
-        const url = forceRefresh ? `${backendUrl}/api/contacts?refresh=true` : `${backendUrl}/api/contacts`;
+        const url = forceRefresh
+          ? `${backendUrl}/api/contacts?sessionId=${encodeURIComponent(currentSessionId)}&refresh=true`
+          : `${backendUrl}/api/contacts?sessionId=${encodeURIComponent(currentSessionId)}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -999,6 +1210,7 @@
 
       // Prepare request
       const formData = new FormData();
+      formData.append('sessionId', currentSessionId);
       formData.append('message', message);
       formData.append('recipients', JSON.stringify(recipients));
       selectedFiles.forEach(file => formData.append('files', file));
@@ -1056,7 +1268,7 @@
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 4500);
 
-      fetch(`${backendUrl}/api/status`, { signal: controller.signal })
+      fetch(`${backendUrl}/api/status?sessionId=${encodeURIComponent(currentSessionId)}`, { signal: controller.signal })
         .then(r => r.json())
         .then(data => {
           clearTimeout(timeoutId);
@@ -1084,6 +1296,8 @@
         });
     }
 
+    // Startup
+    loadSessionsList();
     checkBackendConnection();
 
     // If after 4.5 seconds still not connected and in loading state, show server error
